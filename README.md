@@ -1,1 +1,1 @@
-# DeepONet_Better_model
+# PhyCRNet_Better_model
