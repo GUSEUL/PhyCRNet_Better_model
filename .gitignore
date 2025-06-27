@@ -1,0 +1,47 @@
+# PyTorch model files (usually large)
+*.pth
+*.pt
+*.pkl
+*.pickle
+
+# Large data files
+*.mat
+*.h5
+*.hdf5
+*.npz
+
+# Training results and outputs
+clean_training_results/
+field_specific_animations/
+training_logs/
+outputs/
+checkpoints/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Large temporary files
+*.tmp
+*.temp 
