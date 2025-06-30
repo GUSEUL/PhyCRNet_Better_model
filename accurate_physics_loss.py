@@ -60,7 +60,7 @@ class AccuratePhysicsLoss(nn.Module):
         self.current_epoch = 0
         self.max_residual_scale = 1.0
         
-        print(f"🔬 Accurate Physics Loss initialized:")
+        print(f"Accurate Physics Loss initialized:")
         print(f"   Pr={self.Pr:.3f}, Ra={self.Ra:.1e}, Ha={self.Ha:.1f}")
         print(f"   Da={self.Da:.1e}, Rd={self.Rd:.2f}, Q={self.Q:.3f}")
     
@@ -338,48 +338,4 @@ class AccuratePhysicsLoss(nn.Module):
         
         return stats
 
-def test_physics_loss():
-    """Test the physics loss implementation."""
-    print("Testing Accurate Physics Loss Implementation")
-    print("=" * 50)
-    
-    # Sample parameters (typical values)
-    params = {
-        'Pr': 6.2,      # Prandtl number for water
-        'Ra': 1e5,      # Rayleigh number  
-        'Ha': 0.0,      # No magnetic field
-        'Da': 1e6,      # High permeability (almost clear fluid)
-        'Rd': 1.8,      # Radiation parameter
-        'Q': 0.0        # No heat source
-    }
-    
-    # Create physics loss
-    physics_loss = AccuratePhysicsLoss(params, dt=0.0001, dx=1.0, dy=1.0)
-    
-    # Create dummy data
-    batch_size, channels, height, width = 2, 4, 42, 42
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    f_now = torch.randn(batch_size, channels, height, width, device=device) * 0.1
-    f_next = f_now + torch.randn_like(f_now) * 0.01  # Small change
-    
-    # Test forward pass
-    physics_loss.set_epoch(10)
-    loss = physics_loss(f_now, f_next)
-    
-    print(f"Physics loss computed: {loss.item():.8f}")
-    
-    # Test validation mode
-    detailed_loss = physics_loss(f_now, f_next, validation_mode=True)
-    
-    print(f"Detailed loss breakdown:")
-    print(f"   Continuity: {detailed_loss['continuity'].item():.8f}")
-    print(f"   Momentum X: {detailed_loss['momentum_x'].item():.8f}")
-    print(f"   Momentum Y: {detailed_loss['momentum_y'].item():.8f}")
-    print(f"   Energy: {detailed_loss['energy'].item():.8f}")
-    print(f"   Total: {detailed_loss['total'].item():.8f}")
-    
-    print("All tests passed!")
-
-if __name__ == "__main__":
-    test_physics_loss() 
+# End of AccuratePhysicsLoss class and module 

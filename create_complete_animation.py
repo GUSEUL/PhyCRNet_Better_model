@@ -36,7 +36,7 @@ def load_trained_model(checkpoint_path, device):
 def generate_all_predictions(model, dataset, device, max_timesteps=None):
     """Generate predictions for all timesteps"""
     
-    print("🔮 Generating predictions for all timesteps...")
+    print("Generating predictions for all timesteps...")
     
     # Determine number of timesteps
     total_timesteps = len(dataset)
@@ -301,14 +301,14 @@ def main():
                 continue
     
     if model is None:
-        print("❌ No valid checkpoint found! Available files:")
+        print("No valid checkpoint found! Available files:")
         for file in os.listdir('.'):
             if file.endswith('.pth'):
                 print(f"   - {file}")
         return
     
     # Load dataset
-    print(f"\n📁 Loading dataset: {config['data_file']}")
+    print(f"\nLoading dataset: {config['data_file']}")
     dataset = MatDataset(config['data_file'])
     print(f"   Total timesteps available: {len(dataset)}")
     
@@ -339,9 +339,9 @@ def main():
     summary_path = create_error_summary_plot(ground_truths, predictions, config['output_dir'])
     
     # Final summary
-    print(f"\n🎉 All animations created successfully!")
-    print(f"📁 Output directory: {config['output_dir']}")
-    print(f"📝 Generated files:")
+    print(f"\nAll animations created successfully!")
+    print(f"Output directory: {config['output_dir']}")
+    print(f"Generated files:")
     for path in animation_paths:
         print(f"   - {os.path.basename(path)}")
     print(f"   - {os.path.basename(summary_path)}")
