@@ -27,7 +27,7 @@ def load_trained_model(checkpoint_path, device):
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
-    print(f"✅ Model loaded from {checkpoint_path}")
+    print(f"Model loaded from {checkpoint_path}")
     print(f"   Epoch: {checkpoint['epoch']}")
     print(f"   Best Val Loss: {checkpoint['best_val_loss']:.6f}")
     
@@ -46,7 +46,7 @@ def generate_all_predictions(model, dataset, device, max_timesteps=None):
     print(f"   Processing {total_timesteps} timesteps (Full dataset: {len(dataset)})")
     print(f"   This will create animations with {total_timesteps} frames each")
     if total_timesteps > 100:
-        print(f"   ⚠️  Large number of frames - animation files will be substantial!")
+        print(f"   Warning: Large number of frames - animation files will be substantial!")
     
     # Storage for results
     ground_truths = {
@@ -89,7 +89,7 @@ def generate_all_predictions(model, dataset, device, max_timesteps=None):
         ground_truths[field] = np.array(ground_truths[field])
         predictions[field] = np.array(predictions[field])
     
-    print(f"✅ Generated predictions for all timesteps")
+    print(f"Generated predictions for all timesteps")
     u_array = ground_truths['u']
     if isinstance(u_array, np.ndarray):
         print(f"   Shape: {u_array.shape}")
@@ -99,7 +99,7 @@ def generate_all_predictions(model, dataset, device, max_timesteps=None):
 def create_field_animation(ground_truth, prediction, field_name, save_path, fps=10):
     """Create animation for a single field showing GT, Prediction, and Difference"""
     
-    print(f"🎬 Creating animation for {field_name}...")
+            print(f"Creating animation for {field_name}...")
     
     # Calculate difference
     difference = prediction - ground_truth
@@ -195,14 +195,14 @@ def create_field_animation(ground_truth, prediction, field_name, save_path, fps=
     anim.save(save_path, writer='pillow', fps=fps, dpi=100)
     plt.close(fig)
     
-    print(f"✅ Animation saved: {save_path}")
+    print(f"Animation saved: {save_path}")
     
     return save_path
 
 def create_error_summary_plot(ground_truths, predictions, save_dir):
     """Create summary plot of errors across all timesteps"""
     
-    print("📊 Creating error summary...")
+    print("Creating error summary...")
     
     fields = ['u', 'v', 't', 'p']
     field_names = ['U-Velocity', 'V-Velocity', 'Temperature', 'Pressure']
@@ -245,10 +245,10 @@ def create_error_summary_plot(ground_truths, predictions, save_dir):
     plt.savefig(summary_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"✅ Error summary saved: {summary_path}")
+    print(f"Error summary saved: {summary_path}")
     
     # Print overall statistics
-    print(f"\n📈 Overall Statistics:")
+    print(f"\nOverall Statistics:")
     for field, field_name in zip(fields, field_names):
         avg_mse = np.mean(errors[field]['mse'])
         avg_mae = np.mean(errors[field]['mae'])
@@ -260,7 +260,7 @@ def create_error_summary_plot(ground_truths, predictions, save_dir):
 def main():
     """Main function to create all animations"""
     
-    print("🎬 Complete Animation Creator")
+    print("Complete Animation Creator")
     print("=" * 60)
     
     # Configuration
@@ -297,7 +297,7 @@ def main():
                 config['checkpoint_path'] = checkpoint_path
                 break
             except Exception as e:
-                print(f"⚠️ Failed to load {checkpoint_path}: {e}")
+                print(f"Warning - Failed to load {checkpoint_path}: {e}")
                 continue
     
     if model is None:
@@ -346,14 +346,14 @@ def main():
         print(f"   - {os.path.basename(path)}")
     print(f"   - {os.path.basename(summary_path)}")
     
-    print(f"\n⚡ Animation Details:")
+    print(f"\nAnimation Details:")
     print(f"   - Timesteps: {len(ground_truths['u'])} (ALL available timesteps)")
     print(f"   - FPS: {config['fps']}")
     print(f"   - Duration: ~{len(ground_truths['u'])/config['fps']:.1f} seconds each")
     print(f"   - Fields: U, V, Temperature, Pressure")
     print(f"   - Shows: Ground Truth | Prediction | Difference")
     print(f"   - Total frames per animation: {len(ground_truths['u'])}")
-    print(f"\n🎬 Each GIF shows the complete temporal evolution of the field!")
+    print(f"\nEach GIF shows the complete temporal evolution of the field!")
     print(f"   You can observe how the model predictions compare to ground truth")
     print(f"   across the entire simulation timespan.")
 

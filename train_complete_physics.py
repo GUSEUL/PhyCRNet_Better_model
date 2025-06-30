@@ -19,7 +19,7 @@ def train_complete_physics_model():
     """Train PhyCRNet with the complete PDE system implementation."""
     
     print("Complete Physics-Enhanced PhyCRNet Training")
-    print("🔬 Implementing Full PDE System:")
+    print("Implementing Full PDE System:")
     print("   1. Continuity: ∂U/∂X + ∂V/∂Y = 0")
     print("   2. X-momentum: ∂U/∂t + U∂U/∂X + V∂U/∂Y = -∂P/∂X + Pr[∇²U] - (Pr/Da)U")
     print("   3. Y-momentum: ∂V/∂t + U∂V/∂X + V∂V/∂Y = -∂P/∂Y + Pr[∇²V] + Ra·Pr·θ - Ha²·Pr·V - (Pr/Da)V")
@@ -54,7 +54,7 @@ def train_complete_physics_model():
     # Physics parameters are already loaded from MATLAB file
     # No need to override with defaults - use actual values
     
-    print(f"📊 Physical Parameters:")
+    print(f"Physical Parameters:")
     print(f"   Ra = {dataset_params['Ra']:.1e} (Rayleigh)")
     print(f"   Pr = {dataset_params['Pr']:.3f} (Prandtl)")
     print(f"   Ha = {dataset_params['Ha']:.1f} (Hartmann)")
@@ -73,7 +73,7 @@ def train_complete_physics_model():
     # Model
     model = PhyCRNet(ch=4, hidden=128, dropout_rate=0.1).to(device)
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"🏗️ Model: {total_params:,} parameters")
+    print(f"Model: {total_params:,} parameters")
     
     # Physics loss
     physics_loss = AccuratePhysicsLoss(
@@ -93,7 +93,7 @@ def train_complete_physics_model():
     }
     best_val_loss = float('inf')
     
-    print("🚀 Starting training...")
+    print("Starting training...")
     print("=" * 80)
     
     for epoch in range(config['num_epochs']):
@@ -155,7 +155,7 @@ def train_complete_physics_model():
                     epoch_stats['batches'] += 1
                 
             except Exception as e:
-                print(f"⚠️ Physics error: {e}")
+                print(f"Warning - Physics error: {e}")
                 # Fallback to data loss only
                 loss_data.backward()
                 optimizer.step()
@@ -212,7 +212,7 @@ def train_complete_physics_model():
         print(f"  Val: {avg_val_loss:.6f}, LR: {current_lr:.2e}, Physics Weight: {physics_weight:.6f}")
         
         if epoch % 10 == 0:
-            print(f"  🔬 Physics Components:")
+            print(f"  Physics Components:")
             print(f"     Continuity: {epoch_stats['continuity']:.8f}")
             print(f"     Momentum X: {epoch_stats['momentum_x']:.8f}")
             print(f"     Momentum Y: {epoch_stats['momentum_y']:.8f}")
@@ -230,14 +230,14 @@ def train_complete_physics_model():
                 'config': config,
                 'dataset_params': dataset_params
             }, config['model_save_path'])
-            print(f"  ✅ Best model saved! Val loss: {best_val_loss:.6f}")
+            print(f"  Best model saved! Val loss: {best_val_loss:.6f}")
         
         # Save visualization
         if (epoch + 1) % config['save_interval'] == 0:
             save_complete_visualization(model, val_loader, history, epoch+1, device)
     
-    print(f"\n🎉 Training completed!")
-    print(f"📈 Best validation loss: {best_val_loss:.6f}")
+    print(f"\nTraining completed!")
+    print(f"Best validation loss: {best_val_loss:.6f}")
     
     return config['model_save_path']
 

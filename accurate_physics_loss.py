@@ -313,7 +313,7 @@ class AccuratePhysicsLoss(nn.Module):
             return total_loss
             
         except Exception as e:
-            print(f"⚠️ Physics loss computation error: {e}")
+            print(f"Warning - Physics loss computation error: {e}")
             # Return small fallback value
             return torch.tensor(1e-6, device=f_now.device, dtype=f_now.dtype)
     
@@ -340,7 +340,7 @@ class AccuratePhysicsLoss(nn.Module):
 
 def test_physics_loss():
     """Test the physics loss implementation."""
-    print("🧪 Testing Accurate Physics Loss Implementation")
+    print("Testing Accurate Physics Loss Implementation")
     print("=" * 50)
     
     # Sample parameters (typical values)
@@ -367,19 +367,19 @@ def test_physics_loss():
     physics_loss.set_epoch(10)
     loss = physics_loss(f_now, f_next)
     
-    print(f"✅ Physics loss computed: {loss.item():.8f}")
+    print(f"Physics loss computed: {loss.item():.8f}")
     
     # Test validation mode
     detailed_loss = physics_loss(f_now, f_next, validation_mode=True)
     
-    print(f"📊 Detailed loss breakdown:")
+    print(f"Detailed loss breakdown:")
     print(f"   Continuity: {detailed_loss['continuity'].item():.8f}")
     print(f"   Momentum X: {detailed_loss['momentum_x'].item():.8f}")
     print(f"   Momentum Y: {detailed_loss['momentum_y'].item():.8f}")
     print(f"   Energy: {detailed_loss['energy'].item():.8f}")
     print(f"   Total: {detailed_loss['total'].item():.8f}")
     
-    print("✅ All tests passed!")
+    print("All tests passed!")
 
 if __name__ == "__main__":
     test_physics_loss() 
