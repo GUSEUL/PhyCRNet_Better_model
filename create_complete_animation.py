@@ -22,14 +22,23 @@ def load_trained_model(checkpoint_path, device):
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # Initialize model
-    model = PhyCRNet(ch=4, hidden=128, dropout_rate=0.1).to(device)
+    # Initialize model with Rd prediction capability
+    model = PhyCRNet(ch=4, hidden=128, dropout_rate=0.1, predict_rd=True).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
     print(f"Model loaded from {checkpoint_path}")
     print(f"   Epoch: {checkpoint['epoch']}")
     print(f"   Best Val Loss: {checkpoint['best_val_loss']:.6f}")
+    
+    # Extract Rd prediction information from checkpoint if available
+    if 'history' in checkpoint and 'predicted_rd' in checkpoint['history']:
+        final_predicted_rd = checkpoint['history']['predicted_rd'][-1]
+        print(f"   Final Predicted Rd: {final_predicted_rd:.4f}")
+    
+    # Extract highest validation loss Rd prediction if available
+    if 'worst_val_rd' in checkpoint:
+        print(f"   Highest Val Loss Predicted Rd: {checkpoint['worst_val_rd']:.4f} (at loss: {checkpoint['worst_val_loss']:.6f})")
     
     return model, checkpoint
 
@@ -66,7 +75,15 @@ def generate_all_predictions(model, dataset, device, max_timesteps=None):
             input_state = input_state.unsqueeze(0).to(device)
             
             # Generate prediction
-            prediction = model(input_state)
+            model_output = model(input_state)
+            
+            # Handle model output (could be prediction only or (prediction, rd_scalar))
+            if isinstance(model_output, tuple):
+                prediction, rd_scalar = model_output
+                # Use only the main 4 channels for animation
+                prediction = prediction[:, :4]
+            else:
+                prediction = model_output
             
             # Convert to numpy and remove batch dimension
             pred_np = prediction.squeeze(0).cpu().numpy()
@@ -99,14 +116,16 @@ def generate_all_predictions(model, dataset, device, max_timesteps=None):
 def create_field_animation(ground_truth, prediction, field_name, save_path, fps=10):
     """Create animation for a single field showing GT, Prediction, and Difference"""
     
-            print(f"Creating animation for {field_name}...")
+    print(f"Creating animation for {field_name}...")
     
     # Calculate difference
     difference = prediction - ground_truth
     
-    # Determine color maps and value ranges
+    # Use seismic colormap for all fields
+    cmap = 'seismic'
+    
+    # Determine value ranges
     if field_name.lower() in ['u', 'v']:
-        cmap = 'RdBu_r'
         # Use symmetric range for velocities
         vmax_gt = max(np.abs(ground_truth.min()), np.abs(ground_truth.max()))
         vmax_pred = max(np.abs(prediction.min()), np.abs(prediction.max()))
@@ -114,11 +133,9 @@ def create_field_animation(ground_truth, prediction, field_name, save_path, fps=
         vmin_gt = vmin_pred = -vmax
         vmax_gt = vmax_pred = vmax
     elif field_name.lower() == 't':
-        cmap = 'hot'
         vmin_gt, vmax_gt = ground_truth.min(), ground_truth.max()
         vmin_pred, vmax_pred = prediction.min(), prediction.max()
     else:  # pressure
-        cmap = 'viridis'
         vmin_gt, vmax_gt = ground_truth.min(), ground_truth.max()
         vmin_pred, vmax_pred = prediction.min(), prediction.max()
     
@@ -353,9 +370,34 @@ def main():
     print(f"   - Fields: U, V, Temperature, Pressure")
     print(f"   - Shows: Ground Truth | Prediction | Difference")
     print(f"   - Total frames per animation: {len(ground_truths['u'])}")
+    print(f"   - Colormap: seismic (applied to all fields)")
     print(f"\nEach GIF shows the complete temporal evolution of the field!")
     print(f"   You can observe how the model predictions compare to ground truth")
     print(f"   across the entire simulation timespan.")
+    
+    # Calculate and display predicted Rd statistics during animation generation
+    # Test if model returns tuple (prediction, rd_scalar)
+    test_input = torch.zeros(1, 4, 42, 42).to(device)
+    test_output = model(test_input)
+    
+    if isinstance(test_output, tuple):
+        rd_predictions = []
+        print(f"\nCalculating Rd predictions across all timesteps...")
+        model.eval()
+        with torch.no_grad():
+            for i in tqdm(range(len(dataset)), desc="Rd Analysis"):
+                input_state, _, _ = dataset[i]
+                input_state = input_state.unsqueeze(0).to(device)
+                _, rd_scalar = model(input_state)
+                rd_predictions.append(rd_scalar.cpu().numpy())
+        
+        rd_array = np.array(rd_predictions).flatten()
+        print(f"\nRd Prediction Statistics:")
+        print(f"   Mean Rd: {np.mean(rd_array):.4f}")
+        print(f"   Std Rd: {np.std(rd_array):.4f}")
+        print(f"   Min Rd: {np.min(rd_array):.4f}")
+        print(f"   Max Rd: {np.max(rd_array):.4f}")
+        print(f"   Target Rd: 1.8000")
 
 if __name__ == "__main__":
     main() 

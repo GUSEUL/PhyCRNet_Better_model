@@ -20,20 +20,19 @@ class AccuratePhysicsLoss(nn.Module):
     Implements all terms from the governing equations.
     """
     
-    def __init__(self, params, dt=0.0001, dx=1.0, dy=1.0, enable_analysis=True):
+    def __init__(self, params, dt=0.0001, dx=1.0, dy=1.0, enable_analysis=True, use_predicted_rd=False):
         super().__init__()
         
         # Physical parameters (use actual values)
         self.Pr = params['Pr']  # Prandtl number
         self.Ra = params['Ra']  # Rayleigh number  
-        # self.Ha = params.get('Ha', 0.0)  # Hartmann number (magnetic field)
-        # self.Da = params.get('Da', 1e6)  # Darcy number (porous media)
-        # self.Rd = params.get('Rd', 1.8)  # Radiation parameter
-        # self.Q = params.get('Q', 0.0)   # Heat source parameter
         self.Ha = params['Ha']  # Hartmann number (magnetic field)
         self.Da = params['Da'] # Darcy number (porous media)
-        self.Rd = params['Rd']  # Radiation parameter
+        self.Rd = params['Rd']  # Default/fallback Radiation parameter
         self.Q = params['Q']   # Heat source parameter
+        
+        # Option to use predicted Rd instead of fixed value
+        self.use_predicted_rd = use_predicted_rd
         
         # Grid parameters
         self.dt = dt
@@ -62,7 +61,8 @@ class AccuratePhysicsLoss(nn.Module):
         
         print(f"Accurate Physics Loss initialized:")
         print(f"   Pr={self.Pr:.3f}, Ra={self.Ra:.1e}, Ha={self.Ha:.1f}")
-        print(f"   Da={self.Da:.1e}, Rd={self.Rd:.2f}, Q={self.Q:.3f}")
+        print(f"   Da={self.Da:.1e}, Rd={'predicted' if use_predicted_rd else f'{self.Rd:.2f}'}, Q={self.Q:.3f}")
+        print(f"   Use predicted Rd: {use_predicted_rd}")
     
     def compute_derivatives(self, field):
         """
@@ -74,24 +74,40 @@ class AccuratePhysicsLoss(nn.Module):
         Returns:
             dict with 'dx', 'dy', 'dxx', 'dyy', 'dxy' derivatives
         """
-        # First derivatives (central difference)
-        dfdx = torch.gradient(field, dim=-1)[0] / self.dx  # ∂f/∂x
-        dfdy = torch.gradient(field, dim=-2)[0] / self.dy  # ∂f/∂y
-        
-        # Second derivatives
-        d2fdx2 = torch.gradient(dfdx, dim=-1)[0] / self.dx  # ∂²f/∂x²
-        d2fdy2 = torch.gradient(dfdy, dim=-2)[0] / self.dy  # ∂²f/∂y²
-        
-        # Mixed derivative (if needed)
-        d2fdxy = torch.gradient(dfdy, dim=-1)[0] / self.dx  # ∂²f/∂x∂y
-        
-        return {
-            'dx': dfdx,
-            'dy': dfdy,
-            'dxx': d2fdx2,
-            'dyy': d2fdy2,
-            'dxy': d2fdxy
-        }
+        try:
+            # Validate input tensor
+            if field.dim() != 4:
+                raise ValueError(f"Expected 4D tensor, got {field.dim()}D")
+            
+            # First derivatives (central difference)
+            dfdx = torch.gradient(field, dim=-1)[0] / self.dx  # ∂f/∂x
+            dfdy = torch.gradient(field, dim=-2)[0] / self.dy  # ∂f/∂y
+            
+            # Second derivatives
+            d2fdx2 = torch.gradient(dfdx, dim=-1)[0] / self.dx  # ∂²f/∂x²
+            d2fdy2 = torch.gradient(dfdy, dim=-2)[0] / self.dy  # ∂²f/∂y²
+            
+            # Mixed derivative (if needed)
+            d2fdxy = torch.gradient(dfdy, dim=-1)[0] / self.dx  # ∂²f/∂x∂y
+            
+            return {
+                'dx': dfdx,
+                'dy': dfdy,
+                'dxx': d2fdx2,
+                'dyy': d2fdy2,
+                'dxy': d2fdxy
+            }
+        except Exception as e:
+            print(f"Error in compute_derivatives: {e}")
+            print(f"Field shape: {field.shape}, Field dim: {field.dim()}")
+            # Return zero derivatives as fallback
+            return {
+                'dx': torch.zeros_like(field),
+                'dy': torch.zeros_like(field),
+                'dxx': torch.zeros_like(field),
+                'dyy': torch.zeros_like(field),
+                'dxy': torch.zeros_like(field)
+            }
     
     def compute_time_derivative(self, f_now, f_next):
         """
@@ -205,7 +221,7 @@ class AccuratePhysicsLoss(nn.Module):
         
         return residual
     
-    def energy_residual(self, U_now, V_now, theta_now, theta_next):
+    def energy_residual(self, U_now, V_now, theta_now, theta_next, rd_value=None):
         """
         Energy equation:
         ∂θ/∂t + U∂θ/∂X + V∂θ/∂Y = (1 + 4Rd/3)[∂²θ/∂X² + ∂²θ/∂Y²] + Q·θ
@@ -214,6 +230,7 @@ class AccuratePhysicsLoss(nn.Module):
             U_now, V_now: velocity at time t
             theta_now: temperature at time t
             theta_next: temperature at time t+dt
+            rd_value: predicted Rd value (optional, uses self.Rd if None)
             
         Returns:
             residual tensor
@@ -227,8 +244,24 @@ class AccuratePhysicsLoss(nn.Module):
         # Convection terms: U∂θ/∂X + V∂θ/∂Y
         convection = U_now * theta_derivs['dx'] + V_now * theta_derivs['dy']
         
+        # Use predicted Rd if available and enabled, otherwise use default
+        if self.use_predicted_rd and rd_value is not None:
+            # Handle rd_value which could be [B, 1] tensor
+            if isinstance(rd_value, torch.Tensor):
+                if rd_value.dim() == 2 and rd_value.size(1) == 1:
+                    # Convert [B, 1] to scalar by taking mean
+                    current_rd = rd_value.mean().item()
+                elif rd_value.dim() == 1:
+                    current_rd = rd_value.mean().item()
+                else:
+                    current_rd = float(rd_value)
+            else:
+                current_rd = float(rd_value)
+        else:
+            current_rd = self.Rd
+        
         # Diffusion with radiation: (1 + 4Rd/3)[∂²θ/∂X² + ∂²θ/∂Y²]
-        diffusion_coeff = 1.0 + (4.0 * self.Rd) / 3.0
+        diffusion_coeff = 1.0 + (4.0 * current_rd) / 3.0
         diffusion = diffusion_coeff * (theta_derivs['dxx'] + theta_derivs['dyy'])
         
         # Heat source: Q·θ
@@ -239,32 +272,52 @@ class AccuratePhysicsLoss(nn.Module):
         
         return residual
     
-    def forward(self, f_now, f_next, validation_mode=False):
+    def forward(self, f_now, f_next, validation_mode=False, rd_scalar=None):
         """
         Compute physics-informed loss for all governing equations.
         
         Args:
             f_now: fields at time t [B, 4, H, W] (U, V, T, P)
-            f_next: fields at time t+dt [B, 4, H, W] (U, V, T, P)
-            validation_mode: if True, return detailed analysis
+            f_next: fields at time t+dt [B, 4 or 5, H, W] (U, V, T, P, [Rd])
+            rd_scalar: predicted Rd scalar values [B, 1] (optional)
             
         Returns:
             total physics loss
         """
-        if f_now.dim() != 4 or f_now.size(1) != 4:
-            return torch.tensor(0.0, device=f_now.device, dtype=f_now.dtype)
-        
-        # Extract fields at current time
-        U_now, V_now, T_now, P_now = torch.chunk(f_now, 4, 1)
-        
-        # Extract fields at next time
-        U_next, V_next, T_next, P_next = torch.chunk(f_next, 4, 1)
-        
-        # Progressive scaling for training stability
-        progress = min(self.current_epoch / 100.0, 1.0)
-        base_scale = 1e-4 * progress  # Start very small
-        
         try:
+            if f_now.dim() != 4 or f_now.size(1) != 4:
+                return torch.tensor(0.0, device=f_now.device, dtype=f_now.dtype)
+            
+            # Extract fields at current time
+            U_now, V_now, T_now, P_now = torch.chunk(f_now, 4, 1)
+            
+            # Extract fields at next time (handle both 4 and 5 channel cases)
+            if f_next.size(1) == 5:
+                # 5 channels: U, V, T, P, Rd_spatial
+                U_next, V_next, T_next, P_next, _ = torch.chunk(f_next, 5, 1)
+            elif f_next.size(1) == 4:
+                # 4 channels: U, V, T, P
+                U_next, V_next, T_next, P_next = torch.chunk(f_next, 4, 1)
+            else:
+                # Unexpected number of channels
+                return torch.tensor(0.0, device=f_now.device, dtype=f_now.dtype)
+        
+            # Progressive scaling for training stability
+            progress = min(self.current_epoch / 100.0, 1.0)
+            base_scale = 1e-4 * progress  # Start very small
+            
+            # Validate tensor dimensions before computation
+            expected_dims = [U_now.dim(), V_now.dim(), T_now.dim(), P_now.dim(),
+                           U_next.dim(), V_next.dim(), T_next.dim(), P_next.dim()]
+            if not all(dim == 4 for dim in expected_dims):
+                return torch.tensor(0.0, device=f_now.device, dtype=f_now.dtype)
+            
+            # Check spatial dimensions consistency
+            shapes = [U_now.shape, V_now.shape, T_now.shape, P_now.shape,
+                     U_next.shape, V_next.shape, T_next.shape, P_next.shape]
+            if not all(shape[2:] == shapes[0][2:] for shape in shapes):
+                return torch.tensor(0.0, device=f_now.device, dtype=f_now.dtype)
+            
             # 1. Continuity equation residual
             continuity_res = self.continuity_residual(U_next, V_next)
             loss_continuity = torch.mean(continuity_res**2) * base_scale * self.w_continuity
@@ -277,8 +330,8 @@ class AccuratePhysicsLoss(nn.Module):
             momentum_y_res = self.momentum_y_residual(U_now, V_now, P_next, V_next, T_next)
             loss_momentum_y = torch.mean(momentum_y_res**2) * base_scale * self.w_momentum_y
             
-            # 4. Energy equation residual
-            energy_res = self.energy_residual(U_now, V_now, T_now, T_next)
+            # 4. Energy equation residual (with optional predicted Rd)
+            energy_res = self.energy_residual(U_now, V_now, T_now, T_next, rd_scalar)
             loss_energy = torch.mean(energy_res**2) * base_scale * self.w_energy
             
             # Total physics loss
@@ -314,6 +367,8 @@ class AccuratePhysicsLoss(nn.Module):
             
         except Exception as e:
             print(f"Warning - Physics loss computation error: {e}")
+            import traceback
+            traceback.print_exc()
             # Return small fallback value
             return torch.tensor(1e-6, device=f_now.device, dtype=f_now.dtype)
     

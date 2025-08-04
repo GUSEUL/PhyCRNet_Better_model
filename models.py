@@ -10,8 +10,13 @@ import torch.nn.functional as F
 class PhyCRNet(nn.Module):
     """Physics-informed Convolutional-Recurrent Network."""
     
-    def __init__(self, ch=4, hidden=192, upscale=1, dropout_rate=0.2):
+    def __init__(self, ch=4, hidden=192, upscale=1, dropout_rate=0.2, predict_rd=True):
         super().__init__()
+        
+        self.predict_rd = predict_rd
+        self.input_ch = ch
+        # Output channels: 4 original + 1 for Rd if predicting
+        self.output_ch = ch + (1 if predict_rd else 0)
         
         # Encoder
         self.enc = nn.Sequential(
@@ -27,7 +32,7 @@ class PhyCRNet(nn.Module):
         # Residual block
         self.residual_block = ResidualBlock(hidden, hidden)
         
-        # Decoder
+        # Decoder for main fields (U, V, T, P)
         self.dec = nn.Sequential(
             nn.Conv2d(hidden, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
             nn.Conv2d(128, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
@@ -35,6 +40,20 @@ class PhyCRNet(nn.Module):
             nn.Conv2d(64, ch*(upscale**2), 3, padding=1),
             nn.PixelShuffle(upscale) if upscale > 1 else nn.Identity()
         )
+        
+        # Rd prediction head (if enabled)
+        if predict_rd:
+            self.rd_head = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),  # Global average pooling
+                nn.Flatten(),
+                nn.Linear(hidden, hidden//4),
+                nn.ReLU(),
+                nn.Dropout(dropout_rate),
+                nn.Linear(hidden//4, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1),
+                nn.Softplus()  # Ensure positive Rd values
+            )
         
         self._initialize_weights()
         self.up = upscale
@@ -57,7 +76,8 @@ class PhyCRNet(nn.Module):
             x (torch.Tensor): Input tensor [B×C×H×W]
             
         Returns:
-            torch.Tensor: Output tensor [B×C×H×W]
+            torch.Tensor: Output tensor [B×(C+1)×H×W] if predict_rd=True, else [B×C×H×W]
+            If predict_rd=True, the last channel contains spatially-replicated Rd values
         """
         # Encoding
         z = self.enc(x)                           # B×hidden×H×W
@@ -70,9 +90,24 @@ class PhyCRNet(nn.Module):
         # Residual processing
         z = self.residual_block(z)                # B×hidden×H×W
         
-        # Decoding
-        out = self.dec(z)                         # B×C×H×W
-        return out
+        # Decoding main fields
+        main_fields = self.dec(z)                 # B×C×H×W (U, V, T, P)
+        
+        if self.predict_rd:
+            # Predict Rd as a scalar value
+            rd_scalar = self.rd_head(z)           # B×1
+            
+            # Create spatial Rd field with the same spatial dimensions as main fields
+            B, _, H, W = main_fields.shape
+            rd_field = rd_scalar.unsqueeze(-1).unsqueeze(-1)  # B×1×1×1
+            rd_field = rd_field.expand(B, 1, H, W)            # B×1×H×W
+            
+            # Concatenate main fields with Rd field
+            out = torch.cat([main_fields, rd_field], dim=1)   # B×(C+1)×H×W
+            
+            return out, rd_scalar  # Return both full output and scalar Rd for monitoring
+        else:
+            return main_fields
 
 class ResidualBlock(nn.Module):
     """Residual block with batch normalization."""
