@@ -29,7 +29,7 @@ def train_complete_physics_model():
     # Configuration
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     config = {
-        'num_epochs': 100,
+        'num_epochs': 200,
         'batch_size': 4,
         'learning_rate': 1e-5,  # Very conservative
         'save_interval': 20,
@@ -62,10 +62,17 @@ def train_complete_physics_model():
     print(f"   Rd = {dataset_params['Rd']:.2f} (Radiation)")
     print(f"   Q = {dataset_params['Q']:.3f} (Heat source)")
     
-    # Split dataset
+    # Split dataset by time step (not randomly)
+    # Use early time steps for training, later time steps for validation
     train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    
+    # Create indices for time-based split
+    train_indices = list(range(train_size))  # Early time steps (0 to train_size-1)
+    val_indices = list(range(train_size, len(dataset)))  # Later time steps
+    
+    # Create subsets based on time indices
+    train_dataset = torch.utils.data.Subset(dataset, train_indices)
+    val_dataset = torch.utils.data.Subset(dataset, val_indices)
     
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
