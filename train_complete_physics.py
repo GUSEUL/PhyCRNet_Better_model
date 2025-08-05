@@ -29,16 +29,18 @@ def train_complete_physics_model():
     # Configuration
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     config = {
-        'num_epochs': 200,
-        'batch_size': 4,
-        'learning_rate': 1e-5,  # Very conservative
+        'num_epochs': 300,
+        'batch_size': 128,
+        'learning_rate': 1e-3,  # Very conservative
         'save_interval': 20,
         'data_file': 'Ra_10^5_Rd_1.8.mat',
         'model_save_path': 'complete_physics_model_checkpoint.pth',
-        'physics_weight_initial': 0.001,  # Start very small
+        'physics_weight_initial': 0.01,  # Start very small
         'physics_weight_max': 0.1,       # Maximum contribution
         'data_weight': 1.0,
         'warmup_epochs': 20,
+        'rd_weight': 0.1,
+        'fraction_train': 0.8,
     }
     
     print(f"Device: {device}")
@@ -64,7 +66,7 @@ def train_complete_physics_model():
     
     # Split dataset by time step (not randomly)
     # Use early time steps for training, later time steps for validation
-    train_size = int(0.8 * len(dataset))
+    train_size = int(config['fraction_train'] * len(dataset))
     
     # Create indices for time-based split
     train_indices = list(range(train_size))  # Early time steps (0 to train_size-1)
@@ -163,7 +165,7 @@ def train_complete_physics_model():
             loss_rd = F.mse_loss(rd_scalar, target_rd)
             
             # Combined data loss
-            loss_data = loss_data_main + 0.1 * loss_rd  # Weight Rd loss lower
+            loss_data = loss_data_main + config['rd_weight'] * loss_rd  # Weight Rd loss lower
             
             # Physics loss with components (if enabled)
             physics_result = None
