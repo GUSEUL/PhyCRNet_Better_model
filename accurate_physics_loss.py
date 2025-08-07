@@ -1,12 +1,13 @@
 """
 Accurate Physics Loss Implementation
-Based on the provided PDE system for magnetohydrodynamic natural convection in porous media.
+Based on the hybrid nanofluid PDE system for magnetohydrodynamic natural convection in porous media.
 
 PDE System:
 1. Continuity: ∂U/∂X + ∂V/∂Y = 0
-2. X-momentum: ∂U/∂t + U∂U/∂X + V∂U/∂Y = -∂P/∂X + Pr[∂²U/∂X² + ∂²U/∂Y²] - (Pr/Da)U
-3. Y-momentum: ∂V/∂t + U∂V/∂X + V∂V/∂Y = -∂P/∂Y + Pr[∂²V/∂X² + ∂²V/∂Y²] + Ra·Pr·θ - Ha²·Pr·V - (Pr/Da)V
-4. Energy: ∂θ/∂t + U∂θ/∂X + V∂θ/∂Y = (1 + 4Rd/3)[∂²θ/∂X² + ∂²θ/∂Y²] + Q·θ
+2. X-momentum: ∂U/∂t + U∂U/∂X + V∂U/∂Y = -∂P/∂X + (ν_thnf/ν_f)Pr[∂²U/∂X² + ∂²U/∂Y²] - (ν_thnf/ν_f)(Pr/Da)U
+3. Y-momentum: ∂V/∂t + U∂V/∂X + V∂V/∂Y = -∂P/∂Y + (ν_thnf/ν_f)Pr[∂²V/∂X² + ∂²V/∂Y²]
+               + (β_thnf/β_f) Ra Pr θ - (ν_thnf/ν_f)(Pr/Da)V - (σ_thnf/σ_f)(ρ_f/ρ_thnf)Ha²Pr V
+4. Energy: ∂θ/∂t + U∂θ/∂X + V∂θ/∂Y = (α_thnf/α_f)[∂²θ/∂X² + ∂²θ/∂Y²] + (ρC_p)_f/(ρC_p)_thnf Q θ
 """
 
 import torch
@@ -20,7 +21,7 @@ class AccuratePhysicsLoss(nn.Module):
     Implements all terms from the governing equations.
     """
     
-    def __init__(self, params, dt=0.0001, dx=1.0, dy=1.0, enable_analysis=True, use_predicted_rd=False):
+    def __init__(self, params, nanofluid_props=None, dt=0.0001, dx=1.0, dy=1.0, enable_analysis=True, use_predicted_ra=False):
         super().__init__()
         
         # Physical parameters (use actual values)
@@ -31,13 +32,38 @@ class AccuratePhysicsLoss(nn.Module):
         self.Rd = params['Rd']  # Default/fallback Radiation parameter
         self.Q = params['Q']   # Heat source parameter
         
-        # Option to use predicted Rd instead of fixed value
-        self.use_predicted_rd = use_predicted_rd
+        # Use provided nanofluid properties or defaults
+        if nanofluid_props is not None:
+            # Use nanofluid property ratios directly from data.py
+            self.nu_thnf_ratio = nanofluid_props['nu_thnf_ratio']               # ν_thnf/ν_f
+            self.sigma_thnf_ratio = nanofluid_props['sigma_thnf_ratio']         # σ_thnf/σ_f
+            self.rho_f_thnf_ratio = nanofluid_props['rho_f_thnf_ratio']         # ρ_f/ρ_thnf
+            self.beta_thnf_ratio = nanofluid_props['beta_thnf_ratio']           # β_thnf/β_f
+            self.alpha_thnf_ratio = nanofluid_props['alpha_thnf_ratio']         # α_thnf/α_f
+            self.rhocp_f_thnf_ratio = nanofluid_props['rhocp_f_thnf_ratio']     # (ρC_p)_f/(ρC_p)_thnf
+            
+            print("Using nanofluid properties from data loader")
+        else:
+            # Use default values for pure fluid case
+            self.nu_thnf_ratio = 1.0
+            self.sigma_thnf_ratio = 1.0
+            self.rho_f_thnf_ratio = 1.0
+            self.beta_thnf_ratio = 1.0
+            self.alpha_thnf_ratio = 1.0
+            self.rhocp_f_thnf_ratio = 1.0
+            
+            print("Using default nanofluid properties (pure fluid case)")
+        
+        # Option to use predicted Ra instead of fixed value
+        self.use_predicted_ra = use_predicted_ra
         
         # Grid parameters
         self.dt = dt
         self.dx = dx
         self.dy = dy
+        
+        # Calculate characteristic scales for physics loss normalization
+        self._calculate_characteristic_scales()
         
         # Loss weighting
         self.w_continuity = 1.0
@@ -61,8 +87,80 @@ class AccuratePhysicsLoss(nn.Module):
         
         print(f"Accurate Physics Loss initialized:")
         print(f"   Pr={self.Pr:.3f}, Ra={self.Ra:.1e}, Ha={self.Ha:.1f}")
-        print(f"   Da={self.Da:.1e}, Rd={'predicted' if use_predicted_rd else f'{self.Rd:.2f}'}, Q={self.Q:.3f}")
-        print(f"   Use predicted Rd: {use_predicted_rd}")
+        print(f"   Da={self.Da:.1e}, Rd={self.Rd:.2f}, Q={self.Q:.3f}")
+        print(f"   Use predicted Ra: {use_predicted_ra}")
+        print(f"   Nanofluid property ratios:")
+        print(f"     ν_thnf/ν_f: {self.nu_thnf_ratio:.4f}")
+        print(f"     σ_thnf/σ_f: {self.sigma_thnf_ratio:.4f}")
+        print(f"     ρ_f/ρ_thnf: {self.rho_f_thnf_ratio:.4f}")
+        print(f"     β_thnf/β_f: {self.beta_thnf_ratio:.4f}")
+        print(f"     α_thnf/α_f: {self.alpha_thnf_ratio:.4f}")
+        print(f"     (ρC_p)_f/(ρC_p)_thnf: {self.rhocp_f_thnf_ratio:.4f}")
+        print(f"   Characteristic scales:")
+        print(f"     Continuity: {self.scale_continuity:.2e}")
+        print(f"     Momentum X: {self.scale_momentum_x:.2e}")
+        print(f"     Momentum Y: {self.scale_momentum_y:.2e}")
+        print(f"     Energy: {self.scale_energy:.2e}")
+    
+    def _calculate_characteristic_scales(self):
+        """Calculate characteristic scales for normalizing physics loss components."""
+        
+        # For continuity equation: ∂U/∂X + ∂V/∂Y = 0
+        # Characteristic scale is based on velocity gradients
+        # Typical velocity ~1, length scale ~1, so gradient scale ~1
+        self.scale_continuity = 1.0
+        
+        # For X-momentum equation:
+        # ∂U/∂t + U∂U/∂X + V∂U/∂Y = -∂P/∂X + (ν_thnf/ν_f)Pr[∂²U/∂X² + ∂²U/∂Y²] - (ν_thnf/ν_f)(Pr/Da)U
+        # The largest terms are typically the viscous and porous drag terms
+        # Viscous term: ~ν_ratio * Pr * U / L² ~ Pr (since ν_ratio ~1, U~1, L~1)
+        # Porous drag: ~ν_ratio * Pr/Da * U ~ Pr/Da
+        momentum_x_scales = [
+            1.0,  # Time derivative and convection
+            1.0,  # Pressure gradient
+            self.nu_thnf_ratio * self.Pr,  # Viscous terms
+            self.nu_thnf_ratio * self.Pr / self.Da  # Porous drag
+        ]
+        self.scale_momentum_x = max(momentum_x_scales)
+        
+        # For Y-momentum equation:
+        # ∂V/∂t + U∂V/∂X + V∂V/∂Y = -∂P/∂Y + (ν_thnf/ν_f)Pr[∂²V/∂X² + ∂²V/∂Y²]
+        #                            + (β_thnf/β_f) Ra Pr θ - (ν_thnf/ν_f)(Pr/Da)V - (σ_thnf/σ_f)(ρ_f/ρ_thnf)Ha²Pr V
+        # The buoyancy and magnetic terms can be very large
+        momentum_y_scales = [
+            1.0,  # Time derivative and convection
+            1.0,  # Pressure gradient  
+            self.nu_thnf_ratio * self.Pr,  # Viscous terms
+            self.beta_thnf_ratio * self.Ra * self.Pr,  # Buoyancy (can be very large!)
+            self.nu_thnf_ratio * self.Pr / self.Da,  # Porous drag
+            self.sigma_thnf_ratio * self.rho_f_thnf_ratio * (self.Ha**2) * self.Pr  # Magnetic force
+        ]
+        self.scale_momentum_y = max(momentum_y_scales)
+        
+        # For energy equation:
+        # ∂θ/∂t + U∂θ/∂X + V∂θ/∂Y = (α_thnf/α_f)[∂²θ/∂X² + ∂²θ/∂Y²] + (ρC_p)_f/(ρC_p)_thnf Q θ
+        # The diffusion and heat source terms set the scale
+        energy_scales = [
+            1.0,  # Time derivative and convection (θ~1, U,V~1)
+            self.alpha_thnf_ratio,  # Thermal diffusion 
+            self.rhocp_f_thnf_ratio * abs(self.Q)  # Heat source (Q can be positive or negative)
+        ]
+        self.scale_energy = max(energy_scales)
+        
+        # Apply additional scaling factors for more aggressive normalization
+        # Based on observed loss magnitudes, we need stronger scaling for momentum_x and energy
+        additional_scaling_factor_momentum_x = 100.0  # Additional factor for x-momentum
+        additional_scaling_factor_energy = 1000.0     # Additional factor for energy
+        
+        self.scale_momentum_x *= additional_scaling_factor_momentum_x
+        self.scale_energy *= additional_scaling_factor_energy
+        
+        # Apply safety factors to avoid too aggressive scaling
+        safety_factor = 0.1  # Allow some margin
+        self.scale_continuity = max(self.scale_continuity, safety_factor)
+        self.scale_momentum_x = max(self.scale_momentum_x, safety_factor)
+        self.scale_momentum_y = max(self.scale_momentum_y, safety_factor)
+        self.scale_energy = max(self.scale_energy, safety_factor)
     
     def compute_derivatives(self, field):
         """
@@ -140,15 +238,15 @@ class AccuratePhysicsLoss(nn.Module):
         
         return residual
     
-    def momentum_x_residual(self, U_now, V_now, P_next, U_next):
+    def momentum_x_residual(self, U_now, V_now, P_next, U_next, V_next):
         """
         X-momentum equation:
-        ∂U/∂t + U∂U/∂X + V∂U/∂Y = -∂P/∂X + Pr[∂²U/∂X² + ∂²U/∂Y²] - (Pr/Da)U
+        ∂U/∂t + U∂U/∂X + V∂U/∂Y = -∂P/∂X + (ν_thnf/ν_f)Pr[∂²U/∂X² + ∂²U/∂Y²] - (ν_thnf/ν_f)(Pr/Da)U
         
         Args:
             U_now, V_now: velocity at time t
             P_next: pressure at time t+dt  
-            U_next: U velocity at time t+dt
+            U_next, V_next: velocity at time t+dt
             
         Returns:
             residual tensor
@@ -166,26 +264,27 @@ class AccuratePhysicsLoss(nn.Module):
         # Pressure gradient: -∂P/∂X
         pressure_grad = -P_derivs['dx']
         
-        # Viscous terms: Pr[∂²U/∂X² + ∂²U/∂Y²]
-        viscous = self.Pr * (U_derivs['dxx'] + U_derivs['dyy'])
+        # Viscous terms with nanofluid properties: (ν_thnf/ν_f)Pr[∂²U/∂X² + ∂²U/∂Y²]
+        viscous = self.nu_thnf_ratio * self.Pr * (U_derivs['dxx'] + U_derivs['dyy'])
         
-        # Porous media drag: -(Pr/Da)U
-        porous_drag = -(self.Pr / self.Da) * U_next
+        # Porous media drag with nanofluid properties: -(ν_thnf/ν_f)(Pr/Da)U
+        porous_drag = -(self.nu_thnf_ratio * self.Pr / self.Da) * U_next
         
         # Residual: LHS - RHS = 0
         residual = (dUdt + convection) - (pressure_grad + viscous + porous_drag)
         
         return residual
     
-    def momentum_y_residual(self, U_now, V_now, P_next, V_next, theta_next):
+    def momentum_y_residual(self, U_now, V_now, P_next, U_next, V_next, theta_next):
         """
         Y-momentum equation:
-        ∂V/∂t + U∂V/∂X + V∂V/∂Y = -∂P/∂Y + Pr[∂²V/∂X² + ∂²V/∂Y²] + Ra·Pr·θ - Ha²·Pr·V - (Pr/Da)V
+        ∂V/∂t + U∂V/∂X + V∂V/∂Y = -∂P/∂Y + (ν_thnf/ν_f)Pr[∂²V/∂X² + ∂²V/∂Y²]
+                                   + (β_thnf/β_f) Ra Pr θ - (ν_thnf/ν_f)(Pr/Da)V - (σ_thnf/σ_f)(ρ_f/ρ_thnf)Ha²Pr V
         
         Args:
             U_now, V_now: velocity at time t
             P_next: pressure at time t+dt
-            V_next: V velocity at time t+dt
+            U_next, V_next: velocity at time t+dt
             theta_next: temperature at time t+dt
             
         Returns:
@@ -204,33 +303,35 @@ class AccuratePhysicsLoss(nn.Module):
         # Pressure gradient: -∂P/∂Y
         pressure_grad = -P_derivs['dy']
         
-        # Viscous terms: Pr[∂²V/∂X² + ∂²V/∂Y²]
-        viscous = self.Pr * (V_derivs['dxx'] + V_derivs['dyy'])
+        # Viscous terms with nanofluid properties: (ν_thnf/ν_f)Pr[∂²V/∂X² + ∂²V/∂Y²]
+        viscous = self.nu_thnf_ratio * self.Pr * (V_derivs['dxx'] + V_derivs['dyy'])
         
-        # Buoyancy force: Ra·Pr·θ
-        buoyancy = self.Ra * self.Pr * theta_next
+        # Buoyancy force with simplified thermal expansion ratio: (β_thnf/β_f) Ra Pr θ
+        buoyancy = self.beta_thnf_ratio * self.Ra * self.Pr * theta_next
         
-        # Magnetic force: -Ha²·Pr·V
-        magnetic = -(self.Ha**2) * self.Pr * V_next
+        # Porous media drag with nanofluid properties: -(ν_thnf/ν_f)(Pr/Da)V
+        porous_drag = -(self.nu_thnf_ratio * self.Pr / self.Da) * V_next
         
-        # Porous media drag: -(Pr/Da)V
-        porous_drag = -(self.Pr / self.Da) * V_next
+        # Simplified magnetic force: -(σ_thnf/σ_f)(ρ_f/ρ_thnf)Ha²Pr V
+        magnetic = -(self.sigma_thnf_ratio * self.rho_f_thnf_ratio * (self.Ha**2) * self.Pr) * V_next
         
         # Residual: LHS - RHS = 0
-        residual = (dVdt + convection) - (pressure_grad + viscous + buoyancy + magnetic + porous_drag)
+        residual = (dVdt + convection) - (pressure_grad + viscous + buoyancy + porous_drag + magnetic)
         
         return residual
     
-    def energy_residual(self, U_now, V_now, theta_now, theta_next, rd_value=None):
+    def energy_residual(self, U_now, V_now, theta_now, theta_next):
         """
         Energy equation:
-        ∂θ/∂t + U∂θ/∂X + V∂θ/∂Y = (1 + 4Rd/3)[∂²θ/∂X² + ∂²θ/∂Y²] + Q·θ
+        ∂θ/∂t + U∂θ/∂X + V∂θ/∂Y = (α_thnf/α_f)[∂²θ/∂X² + ∂²θ/∂Y²] + (ρC_p)_f/(ρC_p)_thnf Q θ
+        
+        Note: The radiation term (Rd) is not present in the new formulation
         
         Args:
             U_now, V_now: velocity at time t
             theta_now: temperature at time t
             theta_next: temperature at time t+dt
-            rd_value: predicted Rd value (optional, uses self.Rd if None)
+
             
         Returns:
             residual tensor
@@ -244,42 +345,25 @@ class AccuratePhysicsLoss(nn.Module):
         # Convection terms: U∂θ/∂X + V∂θ/∂Y
         convection = U_now * theta_derivs['dx'] + V_now * theta_derivs['dy']
         
-        # Use predicted Rd if available and enabled, otherwise use default
-        if self.use_predicted_rd and rd_value is not None:
-            # Handle rd_value which could be [B, 1] tensor
-            if isinstance(rd_value, torch.Tensor):
-                if rd_value.dim() == 2 and rd_value.size(1) == 1:
-                    # Convert [B, 1] to scalar by taking mean
-                    current_rd = rd_value.mean().item()
-                elif rd_value.dim() == 1:
-                    current_rd = rd_value.mean().item()
-                else:
-                    current_rd = float(rd_value)
-            else:
-                current_rd = float(rd_value)
-        else:
-            current_rd = self.Rd
+        # Diffusion with nanofluid thermal diffusivity: (α_thnf/α_f)[∂²θ/∂X² + ∂²θ/∂Y²]
+        diffusion = self.alpha_thnf_ratio * (theta_derivs['dxx'] + theta_derivs['dyy'])
         
-        # Diffusion with radiation: (1 + 4Rd/3)[∂²θ/∂X² + ∂²θ/∂Y²]
-        diffusion_coeff = 1.0 + (4.0 * current_rd) / 3.0
-        diffusion = diffusion_coeff * (theta_derivs['dxx'] + theta_derivs['dyy'])
-        
-        # Heat source: Q·θ
-        heat_source = self.Q * theta_next
+        # Heat source with nanofluid heat capacity: (ρC_p)_f/(ρC_p)_thnf Q θ
+        heat_source = self.rhocp_f_thnf_ratio * self.Q * theta_next
         
         # Residual: LHS - RHS = 0
         residual = (dthetadt + convection) - (diffusion + heat_source)
         
         return residual
     
-    def forward(self, f_now, f_next, validation_mode=False, rd_scalar=None):
+    def forward(self, f_now, f_next, validation_mode=False, ra_scalar=None):
         """
         Compute physics-informed loss for all governing equations.
         
         Args:
             f_now: fields at time t [B, 4, H, W] (U, V, T, P)
-            f_next: fields at time t+dt [B, 4 or 5, H, W] (U, V, T, P, [Rd])
-            rd_scalar: predicted Rd scalar values [B, 1] (optional)
+            f_next: fields at time t+dt [B, 4 or 5, H, W] (U, V, T, P, [Ra])
+            ra_scalar: predicted Ra scalar values [B, 1] (optional)
             
         Returns:
             total physics loss
@@ -304,7 +388,7 @@ class AccuratePhysicsLoss(nn.Module):
         
             # Progressive scaling for training stability
             progress = min(self.current_epoch / 100.0, 1.0)
-            base_scale = 1e-4 * progress  # Start very small
+            base_scale = 1e-3 * (0.1 + 0.9 * progress)  # Start small but not too small
             
             # Validate tensor dimensions before computation
             expected_dims = [U_now.dim(), V_now.dim(), T_now.dim(), P_now.dim(),
@@ -318,27 +402,27 @@ class AccuratePhysicsLoss(nn.Module):
             if not all(shape[2:] == shapes[0][2:] for shape in shapes):
                 return torch.tensor(0.0, device=f_now.device, dtype=f_now.dtype)
             
-            # 1. Continuity equation residual
+            # 1. Continuity equation residual with proper scaling
             continuity_res = self.continuity_residual(U_next, V_next)
-            loss_continuity = torch.mean(continuity_res**2) * base_scale * self.w_continuity
+            loss_continuity = torch.mean(continuity_res**2) / (self.scale_continuity**2) * base_scale * self.w_continuity
             
-            # 2. X-momentum equation residual
-            momentum_x_res = self.momentum_x_residual(U_now, V_now, P_next, U_next)
-            loss_momentum_x = torch.mean(momentum_x_res**2) * base_scale * self.w_momentum_x
+            # 2. X-momentum equation residual with proper scaling
+            momentum_x_res = self.momentum_x_residual(U_now, V_now, P_next, U_next, V_next)
+            loss_momentum_x = torch.mean(momentum_x_res**2) / (self.scale_momentum_x**2) * base_scale * self.w_momentum_x
             
-            # 3. Y-momentum equation residual  
-            momentum_y_res = self.momentum_y_residual(U_now, V_now, P_next, V_next, T_next)
-            loss_momentum_y = torch.mean(momentum_y_res**2) * base_scale * self.w_momentum_y
+            # 3. Y-momentum equation residual with proper scaling
+            momentum_y_res = self.momentum_y_residual(U_now, V_now, P_next, U_next, V_next, T_next)
+            loss_momentum_y = torch.mean(momentum_y_res**2) / (self.scale_momentum_y**2) * base_scale * self.w_momentum_y
             
-            # 4. Energy equation residual (with optional predicted Rd)
-            energy_res = self.energy_residual(U_now, V_now, T_now, T_next, rd_scalar)
-            loss_energy = torch.mean(energy_res**2) * base_scale * self.w_energy
+            # 4. Energy equation residual with proper scaling
+            energy_res = self.energy_residual(U_now, V_now, T_now, T_next)
+            loss_energy = torch.mean(energy_res**2) / (self.scale_energy**2) * base_scale * self.w_energy
             
             # Total physics loss
             total_loss = loss_continuity + loss_momentum_x + loss_momentum_y + loss_energy
             
-            # Safety clamp
-            total_loss = torch.clamp(total_loss, min=1e-10, max=1.0)
+            # Safety clamp with more reasonable bounds
+            total_loss = torch.clamp(total_loss, min=1e-8, max=10.0)
             
             # Store analysis data
             if self.enable_analysis:
@@ -375,6 +459,30 @@ class AccuratePhysicsLoss(nn.Module):
     def set_epoch(self, epoch):
         """Set current epoch for progressive training."""
         self.current_epoch = epoch
+    
+    def update_loss_weights(self, continuity=None, momentum_x=None, momentum_y=None, energy=None):
+        """Update individual loss component weights for fine-tuning balance."""
+        if continuity is not None:
+            self.w_continuity = continuity
+        if momentum_x is not None:
+            self.w_momentum_x = momentum_x
+        if momentum_y is not None:
+            self.w_momentum_y = momentum_y
+        if energy is not None:
+            self.w_energy = energy
+        
+        print(f"Updated loss weights: continuity={self.w_continuity:.3f}, "
+              f"momentum_x={self.w_momentum_x:.3f}, momentum_y={self.w_momentum_y:.3f}, "
+              f"energy={self.w_energy:.3f}")
+    
+    def get_characteristic_scales(self):
+        """Return the computed characteristic scales for analysis."""
+        return {
+            'continuity': self.scale_continuity,
+            'momentum_x': self.scale_momentum_x,
+            'momentum_y': self.scale_momentum_y,
+            'energy': self.scale_energy
+        }
     
     def get_residual_statistics(self):
         """Get statistics about PDE residuals for analysis."""

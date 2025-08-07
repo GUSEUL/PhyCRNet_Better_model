@@ -7,14 +7,133 @@ import torch
 from torch.utils.data import Dataset
 import scipy.io as sio
 import numpy as np
+import os
+
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+    print("Warning: h5py not available. MATLAB v7.3 files will not be supported.")
+
+def load_mat_file(mat_file_path):
+    """
+    Load MATLAB file with support for both v7.0 and v7.3 formats.
+    
+    Args:
+        mat_file_path (str): Path to .mat file
+        
+    Returns:
+        dict: Dictionary containing all variables from the file
+    """
+    if not os.path.exists(mat_file_path):
+        raise FileNotFoundError(f"MATLAB file {mat_file_path} not found")
+    
+    try:
+        # Try scipy.io first (for v7.0 and earlier)
+        mat_data = sio.loadmat(mat_file_path)
+        print(f"Loaded {mat_file_path} with scipy.io (MATLAB v7.0 or earlier)")
+        return mat_data
+    except NotImplementedError:
+        if not HAS_H5PY:
+            raise ImportError("MATLAB v7.3 file detected but h5py is not available. Please install h5py: pip install h5py")
+        
+        print(f"Loading {mat_file_path} with h5py (MATLAB v7.3)")
+        # Load with h5py for v7.3 files
+        with h5py.File(mat_file_path, 'r') as f:
+            mat_data = {}
+            for key in f.keys():
+                if not key.startswith('#'):  # Skip h5py metadata
+                    mat_data[key] = np.array(f[key])
+        return mat_data
+
+def extract_nanofluid_properties(mat_data):
+    """
+    Extract nanofluid properties from loaded MATLAB data.
+    
+    Args:
+        mat_data (dict): Dictionary from load_mat_file()
+        
+    Returns:
+        dict: Dictionary containing nanofluid properties
+    """
+    def extract_scalar(mat_var, default_value, var_name):
+        """Safely extract scalar value from MATLAB variable."""
+        try:
+            if mat_var is None:
+                print(f"Warning: {var_name} not found, using default value {default_value}")
+                return default_value
+            
+            # Handle numpy arrays (common case)
+            if hasattr(mat_var, 'shape'):
+                if mat_var.size == 1:
+                    return float(mat_var.item())  # Extract single value safely
+                else:
+                    print(f"Warning: {var_name} has multiple values, using first element")
+                    return float(mat_var.flat[0])
+            
+            # Handle direct scalar values
+            return float(mat_var)
+            
+        except (ValueError, TypeError, AttributeError) as e:
+            print(f"Warning: Could not extract {var_name}, using default value {default_value}. Error: {e}")
+            return default_value
+    
+    # Extract nanofluid properties - these names match the actual MATLAB file
+    nanofluid_props = {
+        # Kinematic viscosity
+        'nu_thnf': extract_scalar(mat_data.get('nuthnf'), 1.0, 'nuthnf'),
+        'nu_f': extract_scalar(mat_data.get('nuf'), 1.0, 'nuf'),
+        
+        # Electrical conductivity
+        'sigma_thnf': extract_scalar(mat_data.get('sigthnf'), 1.0, 'sigthnf'),
+        'sigma_f': extract_scalar(mat_data.get('sigf'), 1.0, 'sigf'),
+        
+        # Density
+        'rho_thnf': extract_scalar(mat_data.get('rothnf'), 1000.0, 'rothnf'),
+        'rho_f': extract_scalar(mat_data.get('rof'), 1000.0, 'rof'),
+        
+        # Thermal expansion coefficient
+        'beta_thnf': extract_scalar(mat_data.get('bethnf'), 1.0, 'bethnf'),
+        'beta_f': extract_scalar(mat_data.get('bef'), 1.0, 'bef'),
+        
+        # Thermal diffusivity
+        'alpha_thnf': extract_scalar(mat_data.get('althnf'), 1.0, 'althnf'),
+        'alpha_f': extract_scalar(mat_data.get('alf'), 1.0, 'alf'),
+        
+        # Heat capacity
+        'rhocp_thnf': extract_scalar(mat_data.get('rocpthnf'), 1.0, 'rocpthnf'),
+        'rhocp_f': extract_scalar(mat_data.get('rocpf'), 1.0, 'rocpf'),
+    }
+    
+    # Calculate ratios
+    ratios = {
+        'nu_thnf_ratio': nanofluid_props['nu_thnf'] / nanofluid_props['nu_f'],
+        'sigma_thnf_ratio': nanofluid_props['sigma_thnf'] / nanofluid_props['sigma_f'],
+        'rho_f_thnf_ratio': nanofluid_props['rho_f'] / nanofluid_props['rho_thnf'],
+        'beta_thnf_ratio': nanofluid_props['beta_thnf'] / nanofluid_props['beta_f'],
+        'alpha_thnf_ratio': nanofluid_props['alpha_thnf'] / nanofluid_props['alpha_f'],
+        'rhocp_f_thnf_ratio': nanofluid_props['rhocp_f'] / nanofluid_props['rhocp_thnf'],
+    }
+    
+    print(f"Nanofluid properties loaded:")
+    print(f"  ν_thnf/ν_f: {ratios['nu_thnf_ratio']:.6f}")
+    print(f"  σ_thnf/σ_f: {ratios['sigma_thnf_ratio']:.6f}")
+    print(f"  ρ_f/ρ_thnf: {ratios['rho_f_thnf_ratio']:.6f}")
+    print(f"  β_thnf/β_f: {ratios['beta_thnf_ratio']:.6f}")
+    print(f"  α_thnf/α_f: {ratios['alpha_thnf_ratio']:.6f}")
+    print(f"  (ρC_p)_f/(ρC_p)_thnf: {ratios['rhocp_f_thnf_ratio']:.6f}")
+    
+    return {**nanofluid_props, **ratios}
 
 class MatDataset(Dataset):
     """Dataset class for loading .mat files with MAC grid data.
     
-    The data is stored in a staggered MAC grid format:
-    - u: staggered in x (41,42,300)
-    - v: staggered in y (42,41,300)
-    - p, θ: cell-centered (42,42,300)
+    The data is stored in a staggered MAC grid format with time as first dimension:
+    - u: (time, 32, 31) staggered in x
+    - v: (time, 31, 32) staggered in y
+    - p: (time, 32, 32) cell-centered
+    - θ: (time, 32, 32) cell-centered
     """
     
     def __init__(self, matfile, device='cpu'):
@@ -24,19 +143,35 @@ class MatDataset(Dataset):
             matfile (str): Path to .mat data file
             device (str): Device to store tensors on
         """
-        d = sio.loadmat(matfile)
+        # Load MATLAB file with v7.3 support
+        d = load_mat_file(matfile)
         
-        # Extract data arrays
-        u_raw = d['ustore']   # (41, 42, 300)  staggered in x
-        v_raw = d['vstore']   # (42, 41, 300)  staggered in y
-        p_raw = d['pstore']   # (42, 42, 300)  cell-centered
-        t_raw = d['tstore']   # (42, 42, 300)  cell-centered
+        # Extract nanofluid properties
+        self.nanofluid_props = extract_nanofluid_properties(d)
         
-        # Transpose from (x,y,t) to (y,x,t) ordering
-        u_raw = np.transpose(u_raw, (1, 0, 2))  # (41, 42, 300) → (42, 41, 300)
-        v_raw = np.transpose(v_raw, (1, 0, 2))  # (42, 41, 300) → (41, 42, 300)
-        p_raw = np.transpose(p_raw, (1, 0, 2))  # (42, 42, 300) → (42, 42, 300)
-        t_raw = np.transpose(t_raw, (1, 0, 2))  # (42, 42, 300) → (42, 42, 300)
+        # Extract data arrays - Time is already the first dimension
+        u_raw = d['ustore']   # (22320, 32, 31)  staggered in x
+        v_raw = d['vstore']   # (22320, 31, 32)  staggered in y  
+        p_raw = d['pstore']   # (22320, 32, 32)  cell-centered
+        t_raw = d['tstore']   # (22320, 32, 32)  cell-centered
+        
+        print(f"Loaded data shapes:")
+        print(f"  u: {u_raw.shape} (time, y, x)")
+        print(f"  v: {v_raw.shape} (time, y, x)")
+        print(f"  p: {p_raw.shape} (time, y, x)")
+        print(f"  t: {t_raw.shape} (time, y, x)")
+        
+        # Transpose from (time, y, x) to (y, x, time) for compatibility with existing code
+        u_raw = np.transpose(u_raw, (1, 2, 0))  # (22320, 32, 31) → (32, 31, 22320)
+        v_raw = np.transpose(v_raw, (1, 2, 0))  # (22320, 31, 32) → (31, 32, 22320)
+        p_raw = np.transpose(p_raw, (1, 2, 0))  # (22320, 32, 32) → (32, 32, 22320)
+        t_raw = np.transpose(t_raw, (1, 2, 0))  # (22320, 32, 32) → (32, 32, 22320)
+        
+        print(f"After transpose to (y, x, time):")
+        print(f"  u: {u_raw.shape}")
+        print(f"  v: {v_raw.shape}")
+        print(f"  p: {p_raw.shape}")
+        print(f"  t: {t_raw.shape}")
         
         # Calculate normalization factors
         self.u_mean, self.u_std = np.mean(u_raw), np.std(u_raw)
@@ -65,21 +200,28 @@ class MatDataset(Dataset):
         }
         
         # Grid dimensions from pressure/temperature field
-        self.ny, self.nx = self.p.shape[0], self.p.shape[1]  # 42, 42
-        self.nt = self.p.shape[2]                            # 300
+        self.ny, self.nx = self.p.shape[0], self.p.shape[1]  # 32, 32
+        self.nt = self.p.shape[2]                            # 22320
         
         # Number of usable time-steps (total - 1)
         self.T = self.nt - 1
         
-        # Store physical parameters
+        # Store physical parameters with safe extraction
+        def safe_extract_param(key, default_value):
+            """Safely extract parameter with default fallback."""
+            try:
+                return float(d[key].squeeze()) if key in d else default_value
+            except:
+                return default_value
+        
         self.params = {
-            'Ra': float(d['Ra'].squeeze()),  # Rayleigh number
-            'Ha': float(d['Ha'].squeeze()),  # Hartmann number
-            'Pr': float(d['Pr'].squeeze()),  # Prandtl number
-            'Da': float(d['Da'].squeeze()),  # Darcy number
-            'Rd': float(d['Rd'].squeeze()),  # Radiation parameter
-            'Q': float(d['Q'].squeeze()),    # Heat source/sink parameter
-            'dt': float(d['dt'].squeeze()) if 'dt' in d else 0.0001,  # Time step
+            'Ra': safe_extract_param('Ra', 1e4),     # Rayleigh number
+            'Ha': safe_extract_param('Ha', 0.0),     # Hartmann number
+            'Pr': safe_extract_param('Pr', 0.71),    # Prandtl number
+            'Da': safe_extract_param('Da', 1e-3),    # Darcy number
+            'Rd': safe_extract_param('Rd', 0.5),     # Radiation parameter
+            'Q': safe_extract_param('Q', 0.0),       # Heat source/sink parameter
+            'dt': safe_extract_param('dt', 0.0001),  # Time step
         }
         
     def __len__(self):
@@ -132,5 +274,10 @@ class MatDataset(Dataset):
         """Return physical and normalization parameters"""
         return {
             **self.params,
-            'norm_params': self.norm_params
-        } 
+            'norm_params': self.norm_params,
+            'nanofluid_props': self.nanofluid_props
+        }
+    
+    def get_nanofluid_properties(self):
+        """Return nanofluid properties for physics loss initialization"""
+        return self.nanofluid_props 

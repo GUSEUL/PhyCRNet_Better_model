@@ -10,13 +10,13 @@ import torch.nn.functional as F
 class PhyCRNet(nn.Module):
     """Physics-informed Convolutional-Recurrent Network."""
     
-    def __init__(self, ch=4, hidden=192, upscale=1, dropout_rate=0.2, predict_rd=True):
+    def __init__(self, ch=4, hidden=192, upscale=1, dropout_rate=0.2, predict_ra=True):
         super().__init__()
         
-        self.predict_rd = predict_rd
+        self.predict_ra = predict_ra
         self.input_ch = ch
-        # Output channels: 4 original + 1 for Rd if predicting
-        self.output_ch = ch + (1 if predict_rd else 0)
+        # Output channels: 4 original + 1 for Ra if predicting
+        self.output_ch = ch + (1 if predict_ra else 0)
         
         # Encoder
         self.enc = nn.Sequential(
@@ -41,9 +41,9 @@ class PhyCRNet(nn.Module):
             nn.PixelShuffle(upscale) if upscale > 1 else nn.Identity()
         )
         
-        # Rd prediction head (if enabled)
-        if predict_rd:
-            self.rd_head = nn.Sequential(
+        # Ra prediction head (if enabled)
+        if predict_ra:
+            self.ra_head = nn.Sequential(
                 nn.AdaptiveAvgPool2d(1),  # Global average pooling
                 nn.Flatten(),
                 nn.Linear(hidden, hidden//4),
@@ -51,11 +51,20 @@ class PhyCRNet(nn.Module):
                 nn.Dropout(dropout_rate),
                 nn.Linear(hidden//4, 64),
                 nn.ReLU(),
-                nn.Linear(64, 1),
-                nn.Softplus()  # Ensure positive Rd values
+                nn.Linear(64, 1)
+                # Output log10(Ra) for numerical stability - no activation needed for log scale
             )
         
         self._initialize_weights()
+        
+        # Initialize Ra prediction head for log10(Ra) around 5.0 (log10(100000))
+        if predict_ra:
+            with torch.no_grad():
+                # Initialize final layer bias to predict log10(Ra) ≈ 5.0
+                self.ra_head[-1].bias.fill_(5.0)  # log10(100000) = 5.0
+                # Small weight initialization for stable log scale prediction
+                self.ra_head[-1].weight.normal_(0, 0.01)
+        
         self.up = upscale
 
     def _initialize_weights(self):
@@ -76,8 +85,8 @@ class PhyCRNet(nn.Module):
             x (torch.Tensor): Input tensor [B×C×H×W]
             
         Returns:
-            torch.Tensor: Output tensor [B×(C+1)×H×W] if predict_rd=True, else [B×C×H×W]
-            If predict_rd=True, the last channel contains spatially-replicated Rd values
+            torch.Tensor: Output tensor [B×(C+1)×H×W] if predict_ra=True, else [B×C×H×W]
+            If predict_ra=True, the last channel contains spatially-replicated Ra values
         """
         # Encoding
         z = self.enc(x)                           # B×hidden×H×W
@@ -93,19 +102,19 @@ class PhyCRNet(nn.Module):
         # Decoding main fields
         main_fields = self.dec(z)                 # B×C×H×W (U, V, T, P)
         
-        if self.predict_rd:
-            # Predict Rd as a scalar value
-            rd_scalar = self.rd_head(z)           # B×1
+        if self.predict_ra:
+            # Predict log10(Ra) as a scalar value for numerical stability
+            ra_scalar = self.ra_head(z)           # B×1 (contains log10(Ra))
             
-            # Create spatial Rd field with the same spatial dimensions as main fields
+            # Create spatial Ra field with the same spatial dimensions as main fields
             B, _, H, W = main_fields.shape
-            rd_field = rd_scalar.unsqueeze(-1).unsqueeze(-1)  # B×1×1×1
-            rd_field = rd_field.expand(B, 1, H, W)            # B×1×H×W
+            ra_field = ra_scalar.unsqueeze(-1).unsqueeze(-1)  # B×1×1×1
+            ra_field = ra_field.expand(B, 1, H, W)            # B×1×H×W
             
-            # Concatenate main fields with Rd field
-            out = torch.cat([main_fields, rd_field], dim=1)   # B×(C+1)×H×W
+            # Concatenate main fields with Ra field
+            out = torch.cat([main_fields, ra_field], dim=1)   # B×(C+1)×H×W
             
-            return out, rd_scalar  # Return both full output and scalar Rd for monitoring
+            return out, ra_scalar  # Return both full output and scalar Ra for monitoring
         else:
             return main_fields
 

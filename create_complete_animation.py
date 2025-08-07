@@ -1,7 +1,7 @@
 """
 Complete Animation Visualization
-Creates GIF animations for all timesteps showing Ground Truth, Prediction, and Difference
-for each field (U, V, Pressure, Temperature)
+Creates high-FPS GIF animations for all timesteps showing Ground Truth, Prediction, and Difference
+for each field (U, V, Pressure, Temperature) with configurable frame rates for smooth visualization
 """
 
 import torch
@@ -22,23 +22,39 @@ def load_trained_model(checkpoint_path, device):
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # Initialize model with Rd prediction capability
-    model = PhyCRNet(ch=4, hidden=128, dropout_rate=0.1, predict_rd=True).to(device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Try to determine model architecture from checkpoint structure
+    model_keys = list(checkpoint['model_state_dict'].keys())
+    has_ra_head = any('ra_head' in key for key in model_keys)
+    
+    # Initialize model with appropriate configuration
+    try:
+        # Try with Ra prediction capability (most likely case)
+        model = PhyCRNet(ch=4, hidden=192, dropout_rate=0.2, predict_ra=has_ra_head).to(device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+    except Exception as e1:
+        try:
+            # Try with different hidden size
+            model = PhyCRNet(ch=4, hidden=128, dropout_rate=0.1, predict_ra=has_ra_head).to(device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+        except Exception as e2:
+            # Try without Ra prediction
+            model = PhyCRNet(ch=4, hidden=192, dropout_rate=0.2, predict_ra=False).to(device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+    
     model.eval()
     
     print(f"Model loaded from {checkpoint_path}")
     print(f"   Epoch: {checkpoint['epoch']}")
     print(f"   Best Val Loss: {checkpoint['best_val_loss']:.6f}")
     
-    # Extract Rd prediction information from checkpoint if available
-    if 'history' in checkpoint and 'predicted_rd' in checkpoint['history']:
-        final_predicted_rd = checkpoint['history']['predicted_rd'][-1]
-        print(f"   Final Predicted Rd: {final_predicted_rd:.4f}")
+    # Extract Ra prediction information from checkpoint if available
+    if 'history' in checkpoint and 'predicted_ra' in checkpoint['history']:
+        final_predicted_ra = checkpoint['history']['predicted_ra'][-1]
+        print(f"   Final Predicted Ra: {final_predicted_ra:.4f}")
     
-    # Extract highest validation loss Rd prediction if available
-    if 'worst_val_rd' in checkpoint:
-        print(f"   Highest Val Loss Predicted Rd: {checkpoint['worst_val_rd']:.4f} (at loss: {checkpoint['worst_val_loss']:.6f})")
+    # Extract highest validation loss Ra prediction if available
+    if 'worst_val_ra' in checkpoint:
+        print(f"   Highest Val Loss Predicted Ra: {checkpoint['worst_val_ra']:.4f} (at loss: {checkpoint['worst_val_loss']:.6f})")
     
     return model, checkpoint
 
@@ -52,9 +68,15 @@ def generate_all_predictions(model, dataset, device, max_timesteps=None):
     if max_timesteps is not None:
         total_timesteps = min(total_timesteps, max_timesteps)
     
+    # Get dataset parameters to show time step info
+    dataset_params = dataset.get_params()
+    dt = dataset_params.get('dt', 0.0001)  # Physical time step
+    
     print(f"   Processing {total_timesteps} timesteps (Full dataset: {len(dataset)})")
+    print(f"   Physical time step (dt): {dt}")
+    print(f"   Total simulation time: {total_timesteps * dt:.4f} time units")
     print(f"   This will create animations with {total_timesteps} frames each")
-    if total_timesteps > 100:
+    if total_timesteps > 1000:
         print(f"   Warning: Large number of frames - animation files will be substantial!")
     
     # Storage for results
@@ -77,9 +99,9 @@ def generate_all_predictions(model, dataset, device, max_timesteps=None):
             # Generate prediction
             model_output = model(input_state)
             
-            # Handle model output (could be prediction only or (prediction, rd_scalar))
+            # Handle model output (could be prediction only or (prediction, ra_scalar))
             if isinstance(model_output, tuple):
-                prediction, rd_scalar = model_output
+                prediction, ra_scalar = model_output
                 # Use only the main 4 channels for animation
                 prediction = prediction[:, :4]
             else:
@@ -113,10 +135,13 @@ def generate_all_predictions(model, dataset, device, max_timesteps=None):
     
     return ground_truths, predictions
 
-def create_field_animation(ground_truth, prediction, field_name, save_path, fps=10):
+def create_field_animation(ground_truth, prediction, field_name, save_path, fps=60):
     """Create animation for a single field showing GT, Prediction, and Difference"""
     
     print(f"Creating animation for {field_name}...")
+    print(f"   Total frames: {len(ground_truth)}")
+    print(f"   FPS: {fps}")
+    print(f"   Duration: ~{len(ground_truth)/fps:.1f} seconds")
     
     # Calculate difference
     difference = prediction - ground_truth
@@ -204,11 +229,13 @@ def create_field_animation(ground_truth, prediction, field_name, save_path, fps=
     
     # Create animation
     total_frames = len(ground_truth)
+    interval_ms = max(1, 1000//fps)  # Minimum 1ms interval for very high FPS
     anim = animation.FuncAnimation(fig, update, frames=total_frames, 
-                                 interval=1000//fps, blit=False, repeat=True)
+                                 interval=interval_ms, blit=False, repeat=True)
     
     # Save animation
     print(f"   Saving to {save_path}...")
+    print(f"   Frame interval: {interval_ms}ms")
     anim.save(save_path, writer='pillow', fps=fps, dpi=100)
     plt.close(fig)
     
@@ -280,17 +307,23 @@ def main():
     print("Complete Animation Creator")
     print("=" * 60)
     
-    # Configuration
+    # Configuration - optimized for training data (01_Da_0.100.mat)
     config = {
-        'checkpoint_path': 'complete_physics_model_checkpoint.pth',  # Update as needed
-        'data_file': 'Ra_10^5_Rd_1.8.mat',
+        'checkpoint_path': 'complete_physics_model_Da_0.100_checkpoint.pth',  # Specific to 01_Da_0.100.mat training
+        'data_file': None,  # Will auto-detect training data file (01_Da_0.100.mat)
         'output_dir': 'complete_animations',
-        'max_timesteps': None,  # Use ALL timesteps (299)
-        'fps': 10,  # Frames per second for smoother animation
+        'max_timesteps': None,  # Use ALL timesteps from training data
+        'fps': 60,  # High FPS for smooth visualization
+        # Alternative FPS options (uncomment one to use):
+        # 'fps': 10,   # Low FPS - for large file compatibility 
+        # 'fps': 30,   # Moderate high FPS - good balance
+        # 'fps': 120,  # Very high FPS - ultra-smooth animation
+        # 'fps': 240,  # Extreme FPS - for detailed analysis (large files)
     }
     
-    # Alternative checkpoint paths to try
+    # Alternative checkpoint paths to try (prioritize Da_0.100 specific model)
     alternative_checkpoints = [
+        'complete_physics_model_Da_0.100_checkpoint.pth',  # Specific to 01_Da_0.100.mat
         'complete_physics_model_checkpoint.pth',
         'physics_enhanced_model_checkpoint.pth', 
         'safe_physics_model_checkpoint.pth',
@@ -323,6 +356,25 @@ def main():
             if file.endswith('.pth'):
                 print(f"   - {file}")
         return
+    
+    # Determine data file from checkpoint config or use default training file
+    if config['data_file'] is None:
+        if 'config' in checkpoint and 'data_file' in checkpoint['config']:
+            config['data_file'] = checkpoint['config']['data_file']
+        else:
+            # Prioritize the training data file (01_Da_0.100.mat) first
+            if os.path.exists('01_Da_0.100.mat'):
+                config['data_file'] = '01_Da_0.100.mat'
+                print(f"Using training data file: {config['data_file']}")
+            else:
+                # Fallback - try to find other .mat files
+                mat_files = [f for f in os.listdir('.') if f.endswith('.mat')]
+                if mat_files:
+                    config['data_file'] = mat_files[0]
+                    print(f"Warning: Using fallback data file: {config['data_file']}")
+                else:
+                    print("Error: No data file specified and no .mat files found!")
+                    return
     
     # Load dataset
     print(f"\nLoading dataset: {config['data_file']}")
@@ -363,41 +415,58 @@ def main():
         print(f"   - {os.path.basename(path)}")
     print(f"   - {os.path.basename(summary_path)}")
     
+    # Get dataset parameters for timing info
+    dataset_params = dataset.get_params()
+    dt = dataset_params.get('dt', 0.0001)
+    total_sim_time = len(ground_truths['u']) * dt
+    
     print(f"\nAnimation Details:")
+    print(f"   - Training Data: {config['data_file']}")
+    print(f"   - Model Checkpoint: {config['checkpoint_path']}")
     print(f"   - Timesteps: {len(ground_truths['u'])} (ALL available timesteps)")
-    print(f"   - FPS: {config['fps']}")
-    print(f"   - Duration: ~{len(ground_truths['u'])/config['fps']:.1f} seconds each")
+    print(f"   - Physical time step (dt): {dt}")
+    print(f"   - Total simulation time: {total_sim_time:.4f} time units")
+    print(f"   - Animation FPS: {config['fps']}")
+    print(f"   - Animation duration: ~{len(ground_truths['u'])/config['fps']:.1f} seconds each")
+    print(f"   - Time compression ratio: {total_sim_time / (len(ground_truths['u'])/config['fps']):.2f}x")
     print(f"   - Fields: U, V, Temperature, Pressure")
     print(f"   - Shows: Ground Truth | Prediction | Difference")
     print(f"   - Total frames per animation: {len(ground_truths['u'])}")
     print(f"   - Colormap: seismic (applied to all fields)")
-    print(f"\nEach GIF shows the complete temporal evolution of the field!")
-    print(f"   You can observe how the model predictions compare to ground truth")
-    print(f"   across the entire simulation timespan.")
+    print(f"\nEach GIF shows the complete temporal evolution comparison:")
+    print(f"   • Ground Truth: Original data from {config['data_file']}")
+    print(f"   • Prediction: Model trained on the same dataset")
+    print(f"   • Difference: Error visualization (Prediction - Ground Truth)")
+    print(f"   High FPS ({config['fps']}) ensures smooth visualization of the physics evolution")
     
-    # Calculate and display predicted Rd statistics during animation generation
-    # Test if model returns tuple (prediction, rd_scalar)
+    # Calculate and display predicted Ra statistics during animation generation
+    # Test if model returns tuple (prediction, ra_scalar)
     test_input = torch.zeros(1, 4, 42, 42).to(device)
     test_output = model(test_input)
     
     if isinstance(test_output, tuple):
-        rd_predictions = []
-        print(f"\nCalculating Rd predictions across all timesteps...")
+        ra_predictions = []
+        print(f"\nCalculating Ra predictions across all timesteps...")
         model.eval()
         with torch.no_grad():
-            for i in tqdm(range(len(dataset)), desc="Rd Analysis"):
+            for i in tqdm(range(len(dataset)), desc="Ra Analysis"):
                 input_state, _, _ = dataset[i]
                 input_state = input_state.unsqueeze(0).to(device)
-                _, rd_scalar = model(input_state)
-                rd_predictions.append(rd_scalar.cpu().numpy())
+                _, ra_scalar = model(input_state)
+                # Convert log10(Ra) back to Ra for analysis
+                ra_predictions.append(np.power(10, ra_scalar.cpu().numpy()))
         
-        rd_array = np.array(rd_predictions).flatten()
-        print(f"\nRd Prediction Statistics:")
-        print(f"   Mean Rd: {np.mean(rd_array):.4f}")
-        print(f"   Std Rd: {np.std(rd_array):.4f}")
-        print(f"   Min Rd: {np.min(rd_array):.4f}")
-        print(f"   Max Rd: {np.max(rd_array):.4f}")
-        print(f"   Target Rd: 1.8000")
+        ra_array = np.array(ra_predictions).flatten()
+        # Get true Ra from dataset
+        dataset_params = dataset.get_params()
+        true_ra = dataset_params.get('Ra', 1e5)
+        
+        print(f"\nRa Prediction Statistics:")
+        print(f"   Mean Ra: {np.mean(ra_array):.4f}")
+        print(f"   Std Ra: {np.std(ra_array):.4f}")
+        print(f"   Min Ra: {np.min(ra_array):.4f}")
+        print(f"   Max Ra: {np.max(ra_array):.4f}")
+        print(f"   Target Ra: {true_ra:.1e}")
 
 if __name__ == "__main__":
     main() 

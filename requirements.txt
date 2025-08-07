@@ -15,20 +15,3 @@ tqdm>=4.64.0
 
 # Image processing
 Pillow>=9.0.0
-
-# Optional dependencies for enhanced functionality
-# Jupyter notebook support (optional)
-# jupyter>=1.0.0
-# ipython>=8.0.0
-
-# Development and debugging (optional)
-# pytest>=7.0.0
-# black>=22.0.0
-# flake8>=4.0.0
-
-# Note: Built-in Python libraries used in this project:
-# - time
-# - os  
-# - glob
-# - warnings
-# These don't need to be installed as they come with Python 
