@@ -65,11 +65,11 @@ class AccuratePhysicsLoss(nn.Module):
         # Calculate characteristic scales for physics loss normalization
         self._calculate_characteristic_scales()
         
-        # Loss weighting
+        # Loss weighting - Start with higher energy weight for temperature focus
         self.w_continuity = 1.0
         self.w_momentum_x = 1.0
         self.w_momentum_y = 1.0
-        self.w_energy = 1.0
+        self.w_energy = 1.0  # Start with 2x weight for energy (temperature) equation
         
         # Analysis
         self.enable_analysis = enable_analysis
@@ -474,6 +474,91 @@ class AccuratePhysicsLoss(nn.Module):
         print(f"Updated loss weights: continuity={self.w_continuity:.3f}, "
               f"momentum_x={self.w_momentum_x:.3f}, momentum_y={self.w_momentum_y:.3f}, "
               f"energy={self.w_energy:.3f}")
+    
+    def adjust_weights_dynamically(self, loss_values, min_ratio_threshold=0.1, max_boost_factor=5.0):
+        """
+        Dynamically adjust loss weights based on relative magnitudes.
+        If energy (temperature) loss is significantly larger than other losses,
+        increase its weight to balance the training.
+        
+        Args:
+            loss_values: dict with keys 'continuity', 'momentum_x', 'momentum_y', 'energy'
+            min_ratio_threshold: minimum ratio before adjustment (default 0.1 = 1 order of magnitude)
+            max_boost_factor: maximum factor to boost any weight
+        """
+        # Extract individual loss values
+        continuity_loss = float(loss_values['continuity'].detach().cpu())
+        momentum_x_loss = float(loss_values['momentum_x'].detach().cpu())
+        momentum_y_loss = float(loss_values['momentum_y'].detach().cpu())
+        energy_loss = float(loss_values['energy'].detach().cpu())
+        
+        adjustment_made = False
+        
+        # Check for energy (temperature) loss imbalance - more aggressive approach
+        other_losses = [continuity_loss, momentum_x_loss, momentum_y_loss]
+        avg_other_loss = np.mean(other_losses)
+        
+        if avg_other_loss > 0 and energy_loss > 0:
+            # Calculate the ratio of energy loss to average other losses
+            energy_to_others_ratio = energy_loss / avg_other_loss
+            
+            # More aggressive threshold - start adjusting at 2x difference instead of 5x
+            if energy_to_others_ratio > (1.0 / (min_ratio_threshold * 2.5)):  # Start at 2x difference
+                # Very aggressive adjustment factor for temperature
+                adjustment_factor = min(max_boost_factor, energy_to_others_ratio ** 0.3)  # Even more aggressive than 0.4
+                
+                # Increase energy weight with higher baseline boost
+                baseline_boost = 1.5  # Always apply at least 1.5x boost when triggered
+                new_energy_weight = min(max_boost_factor, self.w_energy * max(baseline_boost, adjustment_factor))
+                
+                # Apply the new weight
+                old_energy_weight = self.w_energy
+                self.w_energy = new_energy_weight
+                
+                print(f"AGGRESSIVE Energy weight adjustment applied:")
+                print(f"  Energy loss: {energy_loss:.2e}, Avg other losses: {avg_other_loss:.2e}")
+                print(f"  Ratio: {energy_to_others_ratio:.2f}")
+                print(f"  Energy weight: {old_energy_weight:.3f} -> {new_energy_weight:.3f}")
+                
+                adjustment_made = True
+            
+            # Additional check: if energy loss is still significantly high relative to total, apply extra boost
+            total_physics_loss = continuity_loss + momentum_x_loss + momentum_y_loss + energy_loss
+            energy_fraction = energy_loss / total_physics_loss if total_physics_loss > 0 else 0
+            
+            if energy_fraction > 0.4 and self.w_energy < max_boost_factor:  # If energy takes >40% of total loss
+                extra_boost = min(1.5, max_boost_factor / self.w_energy)
+                old_energy_weight = self.w_energy
+                self.w_energy = min(max_boost_factor, self.w_energy * extra_boost)
+                
+                print(f"EXTRA Energy boost applied (fraction={energy_fraction:.1%}):")
+                print(f"  Energy weight: {old_energy_weight:.3f} -> {self.w_energy:.3f}")
+                
+                adjustment_made = True
+        
+        # Additional check: boost momentum equations for pressure-related terms
+        # If momentum losses are very small compared to energy, boost them too
+        momentum_avg = np.mean([momentum_x_loss, momentum_y_loss])
+        if momentum_avg > 0 and energy_loss > 0:
+            momentum_to_energy_ratio = momentum_avg / energy_loss
+            
+            # If momentum losses are much smaller than energy loss, boost them
+            if momentum_to_energy_ratio < min_ratio_threshold:
+                boost_factor = min(2.0, np.sqrt(1.0 / momentum_to_energy_ratio))
+                
+                old_momentum_x = self.w_momentum_x
+                old_momentum_y = self.w_momentum_y
+                
+                self.w_momentum_x = min(max_boost_factor, self.w_momentum_x * boost_factor)
+                self.w_momentum_y = min(max_boost_factor, self.w_momentum_y * boost_factor)
+                
+                print(f"Momentum weight boost applied:")
+                print(f"  Momentum X weight: {old_momentum_x:.3f} -> {self.w_momentum_x:.3f}")
+                print(f"  Momentum Y weight: {old_momentum_y:.3f} -> {self.w_momentum_y:.3f}")
+                
+                adjustment_made = True
+        
+        return adjustment_made
     
     def get_characteristic_scales(self):
         """Return the computed characteristic scales for analysis."""

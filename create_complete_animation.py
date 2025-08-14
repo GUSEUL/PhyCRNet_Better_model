@@ -20,7 +20,7 @@ def load_trained_model(checkpoint_path, device):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Try to determine model architecture from checkpoint structure
     model_keys = list(checkpoint['model_state_dict'].keys())

@@ -20,7 +20,7 @@ def load_checkpoint_history(checkpoint_path):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
     if 'history' not in checkpoint:
         raise ValueError("No training history found in checkpoint")
@@ -35,7 +35,7 @@ def load_checkpoint_history(checkpoint_path):
 def load_trained_model(checkpoint_path, device):
     """Load trained model from checkpoint"""
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Try to determine model architecture
     model_keys = list(checkpoint['model_state_dict'].keys())
@@ -114,20 +114,27 @@ def evaluate_test_metrics(model, dataset, device, max_samples=None):
             # Calculate physics loss (use input and prediction as temporal pair)
             try:
                 physics_result = physics_loss_fn(input_state, prediction, validation_mode=True)
-                if isinstance(physics_result, dict):
-                    # Sum up all physics components
+                if isinstance(physics_result, dict) and 'total' in physics_result:
+                    # Use the 'total' field directly
+                    total_physics = physics_result['total']
+                elif isinstance(physics_result, dict):
+                    # Sum up only the physics loss components (skip 'residuals' dict)
                     total_physics = 0.0
-                    for component_loss in physics_result.values():
-                        if torch.is_tensor(component_loss):
+                    for key, component_loss in physics_result.items():
+                        if key != 'residuals' and torch.is_tensor(component_loss):
                             total_physics += component_loss
-                        else:
+                        elif key != 'residuals' and isinstance(component_loss, (int, float)):
                             total_physics += component_loss
                 elif torch.is_tensor(physics_result):
                     total_physics = physics_result
                 else:
                     total_physics = torch.tensor(physics_result)
                 
-                physics_losses.append(float(total_physics.cpu().item()))
+                # Ensure we have a scalar value
+                if torch.is_tensor(total_physics):
+                    physics_losses.append(float(total_physics.cpu().item()))
+                else:
+                    physics_losses.append(float(total_physics))
             except Exception as e:
                 # Fallback: skip physics loss calculation if it fails
                 print(f"Warning: Physics loss calculation failed: {e}")
@@ -184,9 +191,9 @@ def create_comprehensive_plots(history, mse_values, max_error_values, physics_lo
     
     # 2. Data Loss vs Physics Loss (Top Center)
     ax2 = fig.add_subplot(gs[0, 1])
-    if 'data_losses' in history and 'physics_losses' in history:
+    if 'data_losses' in history and 'unweighted_physics' in history:
         ax2.semilogy(epochs, history['data_losses'], 'g-', linewidth=2, alpha=0.8, label='Data Loss')
-        ax2.semilogy(epochs, history['physics_losses'], 'orange', linewidth=2, alpha=0.8, label='Physics Loss')
+        ax2.semilogy(epochs, history['unweighted_physics'], 'orange', linewidth=2, alpha=0.8, label='Physics Loss')
         ax2.set_title('Data vs Physics Loss', fontsize=14, fontweight='bold')
         ax2.set_xlabel('Epoch')
         ax2.set_ylabel('Loss (Log Scale)')

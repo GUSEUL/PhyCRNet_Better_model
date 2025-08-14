@@ -31,7 +31,7 @@ def train_complete_physics_model():
     # Configuration
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     config = {
-        'num_epochs': 300,
+        'num_epochs': 500,
         'batch_size': 128,
         'learning_rate': 1e-3,  # Very conservative
         'save_interval': 50,
@@ -45,10 +45,23 @@ def train_complete_physics_model():
         'fraction_train': 0.7,  # 70% for training
         'fraction_val': 0.2,    # 20% for validation
         'fraction_test': 0.1,   # 10% for testing
+        # Dynamic weight adjustment parameters
+        'dynamic_weights': True,          # Enable dynamic weight adjustment
+        'weight_adjust_interval': 10,     # Adjust weights every N batches
+        'weight_adjust_warmup': 250,      # Start adjusting after N epochs
+        'min_ratio_threshold': 0.2,       # Minimum ratio before adjustment (5x difference)
+        'max_boost_factor': 10.0,         # Maximum factor to boost any weight
     }
     
     print(f"Device: {device}")
     print(f"Physics weight: {config['physics_weight_initial']} → {config['physics_weight_max']}")
+    print(f"Dynamic weight adjustment: {'Enabled' if config['dynamic_weights'] else 'Disabled'}")
+    if config['dynamic_weights']:
+        print(f"  Adjustment parameters:")
+        print(f"    - Warmup epochs: {config['weight_adjust_warmup']}")
+        print(f"    - Adjustment interval: every {config['weight_adjust_interval']} batches")
+        print(f"    - Ratio threshold: {config['min_ratio_threshold']} (1/{1/config['min_ratio_threshold']:.0f} = {1/config['min_ratio_threshold']:.0f}x)")
+        print(f"    - Max boost factor: {config['max_boost_factor']}x")
     
     # Create directories
     os.makedirs('complete_physics_results', exist_ok=True)
@@ -132,7 +145,7 @@ def train_complete_physics_model():
     history = {
         'train_losses': [], 'val_losses': [], 'physics_losses': [], 'data_losses': [],
         'continuity': [], 'momentum_x': [], 'momentum_y': [], 'energy': [],
-        'predicted_ra': [], 'ra_loss': []
+        'unweighted_physics': [], 'predicted_ra': [], 'ra_loss': []
     }
     best_val_loss = float('inf')
     worst_val_loss = 0.0
@@ -164,11 +177,11 @@ def train_complete_physics_model():
         epoch_stats = {
             'train_loss': 0.0, 'physics_loss': 0.0, 'data_loss': 0.0, 'ra_loss': 0.0,
             'continuity': 0.0, 'momentum_x': 0.0, 'momentum_y': 0.0, 'energy': 0.0,
-            'predicted_ra': 0.0, 'batches': 0
+            'unweighted_physics': 0.0, 'predicted_ra': 0.0, 'batches': 0
         }
         
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1:3d}')
-        for input_state, target_state, _ in progress_bar:
+        for batch_idx, (input_state, target_state, _) in enumerate(progress_bar):
             input_state = input_state.to(device)
             target_state = target_state.to(device)
             
@@ -213,6 +226,29 @@ def train_complete_physics_model():
                         # Ensure physics loss is a scalar tensor
                         if hasattr(loss_physics_total, 'dim') and loss_physics_total.dim() > 0:
                             loss_physics_total = loss_physics_total.mean()
+                        
+                        # Dynamic weight adjustment: check if temperature (energy) loss is significantly larger
+                        if (config['dynamic_weights'] and 
+                            epoch > config['weight_adjust_warmup'] and 
+                            batch_idx % config['weight_adjust_interval'] == 0):
+                            try:
+                                weight_adjusted = physics_loss.adjust_weights_dynamically(
+                                    physics_result, 
+                                    min_ratio_threshold=config['min_ratio_threshold'],
+                                    max_boost_factor=config['max_boost_factor']
+                                )
+                                if weight_adjusted:
+                                    # Recalculate physics loss with new weights
+                                    if use_predicted_ra:
+                                        physics_result = physics_loss(input_state, prediction[:, :4], validation_mode=True, ra_scalar=ra_scalar)
+                                    else:
+                                        physics_result = physics_loss(input_state, prediction[:, :4], validation_mode=True)
+                                    loss_physics_total = physics_result['total']
+                                    if hasattr(loss_physics_total, 'dim') and loss_physics_total.dim() > 0:
+                                        loss_physics_total = loss_physics_total.mean()
+                            except Exception as e:
+                                print(f"Warning - Dynamic weight adjustment failed: {e}")
+                        
                         # Add physics loss to total
                         total_loss = config['data_weight'] * loss_data + physics_weight * loss_physics_total
                     else:
@@ -238,18 +274,53 @@ def train_complete_physics_model():
                 epoch_stats['data_loss'] += loss_data.item()
                 epoch_stats['ra_loss'] += loss_ra.item()
                 
-                # Add physics component stats if available
+                # Add physics component stats if available (store both weighted and unweighted)
                 if physics_result is not None and isinstance(physics_result, dict):
                     try:
+                        # Get unweighted physics loss for comparison
+                        unweighted_total = 0.0
                         for key in ['continuity', 'momentum_x', 'momentum_y', 'energy']:
                             if key in physics_result:
                                 value = physics_result[key]
                                 if hasattr(value, 'dim') and value.dim() == 0:
                                     epoch_stats[key] += value.item()
+                                    # Calculate unweighted contribution
+                                    if key == 'continuity':
+                                        unweighted_total += value.item() / physics_loss.w_continuity
+                                    elif key == 'momentum_x':
+                                        unweighted_total += value.item() / physics_loss.w_momentum_x
+                                    elif key == 'momentum_y':
+                                        unweighted_total += value.item() / physics_loss.w_momentum_y
+                                    elif key == 'energy':
+                                        unweighted_total += value.item() / physics_loss.w_energy
                                 elif hasattr(value, 'mean'):
                                     epoch_stats[key] += value.mean().item()
+                                    # Calculate unweighted contribution
+                                    mean_val = value.mean().item()
+                                    if key == 'continuity':
+                                        unweighted_total += mean_val / physics_loss.w_continuity
+                                    elif key == 'momentum_x':
+                                        unweighted_total += mean_val / physics_loss.w_momentum_x
+                                    elif key == 'momentum_y':
+                                        unweighted_total += mean_val / physics_loss.w_momentum_y
+                                    elif key == 'energy':
+                                        unweighted_total += mean_val / physics_loss.w_energy
                                 else:
                                     epoch_stats[key] += float(value)
+                                    if key == 'continuity':
+                                        unweighted_total += float(value) / physics_loss.w_continuity
+                                    elif key == 'momentum_x':
+                                        unweighted_total += float(value) / physics_loss.w_momentum_x
+                                    elif key == 'momentum_y':
+                                        unweighted_total += float(value) / physics_loss.w_momentum_y
+                                    elif key == 'energy':
+                                        unweighted_total += float(value) / physics_loss.w_energy
+                        
+                        # Store unweighted physics loss
+                        if 'unweighted_physics' not in epoch_stats:
+                            epoch_stats['unweighted_physics'] = 0.0
+                        epoch_stats['unweighted_physics'] += unweighted_total
+                        
                     except Exception as e:
                         print(f"Warning - Error extracting physics components: {e}")
                 
@@ -316,6 +387,7 @@ def train_complete_physics_model():
         history['momentum_x'].append(epoch_stats['momentum_x'])
         history['momentum_y'].append(epoch_stats['momentum_y'])
         history['energy'].append(epoch_stats['energy'])
+        history['unweighted_physics'].append(epoch_stats['unweighted_physics'])
         history['predicted_ra'].append(epoch_stats['predicted_ra'])
         history['ra_loss'].append(epoch_stats['ra_loss'])
         
@@ -328,16 +400,16 @@ def train_complete_physics_model():
         
         # Print progress with timing information
         print(f"\nEpoch {epoch+1:3d}/{config['num_epochs']} ({epoch_time:.1f}s | Avg: {avg_epoch_time:.1f}s | Total: {total_elapsed/60:.1f}m | ETA: {estimated_remaining/60:.1f}m)")
-        print(f"  Train: {epoch_stats['train_loss']:.6f} (Data: {epoch_stats['data_loss']:.6f}, Physics: {epoch_stats['physics_loss']:.6f}, Ra: {epoch_stats['ra_loss']:.6f})")
+        print(f"  Train: {epoch_stats['train_loss']:.6f} (Data: {epoch_stats['data_loss']:.6f}, Physics: {epoch_stats['physics_loss']:.6f} [Raw: {epoch_stats['unweighted_physics']:.6f}], Ra: {epoch_stats['ra_loss']:.6f})")
         print(f"  Val: {avg_val_loss:.6f}, LR: {current_lr:.2e}, Physics Weight: {physics_weight:.6f}")
         print(f"  Predicted Ra: {epoch_stats['predicted_ra']:.6f} (Target: {dataset_params['Ra']:.6f}, Val: {avg_val_ra:.6f})")
         
         if epoch % 10 == 0:
-            print(f"  Physics Components:")
-            print(f"     Continuity: {epoch_stats['continuity']:.6f}")
-            print(f"     Momentum X: {epoch_stats['momentum_x']:.6f}")
-            print(f"     Momentum Y: {epoch_stats['momentum_y']:.6f}")
-            print(f"     Energy: {epoch_stats['energy']:.6f}")
+            print(f"  Physics Components (with weights):")
+            print(f"     Continuity: {epoch_stats['continuity']:.6f} (w={physics_loss.w_continuity:.1f})")
+            print(f"     Momentum X: {epoch_stats['momentum_x']:.6f} (w={physics_loss.w_momentum_x:.1f})")
+            print(f"     Momentum Y: {epoch_stats['momentum_y']:.6f} (w={physics_loss.w_momentum_y:.1f})")
+            print(f"     Energy: {epoch_stats['energy']:.6f} (w={physics_loss.w_energy:.1f})")
         
         # Track worst validation loss and corresponding Ra
         if avg_val_loss > worst_val_loss:
